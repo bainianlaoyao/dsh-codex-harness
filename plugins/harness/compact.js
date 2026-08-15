@@ -17,6 +17,7 @@
 
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20000
 export const AUTO_COMPACT_FRACTION = 0.9
+export const APPROX_BYTES_PER_TOKEN = 4
 export const TRUNCATION_NOTICE = '\n[... text truncated by compaction ...]'
 
 /** codex prompts/templates/compact/prompt.md (verbatim port). */
@@ -44,20 +45,66 @@ export const NO_SUMMARY_TEXT = '(no summary available)'
 
 /** codex compact.rs:389-392 user-facing warning after compaction. */
 export const COMPACTION_WARNING =
-  'Heads up: Long threads and multiple compactions can cause the model to be less accurate. A fresh thread is often better for tackling unrelated tasks.'
+  'Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.'
 
-/** codex bytes/4 heuristic (history.rs:246). */
+/** codex bytes/4 heuristic (truncate.rs:71-74, history.rs:246). */
 export function approxTokens(text) {
-  return Math.ceil((typeof text === 'string' ? text.length : 0) / 4)
+  return Math.ceil(Buffer.byteLength(String(text), 'utf8') / APPROX_BYTES_PER_TOKEN)
 }
 
-/** Truncate text to a token budget, keeping the head (codex truncation direction). */
+/** Approximate byte budget for a token count (truncate.rs). */
+export function approxBytesForTokens(tokens) {
+  return tokens * APPROX_BYTES_PER_TOKEN
+}
+
+/**
+ * Middle truncation port (utils/string/src/truncate.rs truncate_with_byte_estimate,
+ * use_tokens=true): keep head and tail around the marker, splitting the budget
+ * 50/50 on byte boundaries.
+ */
+export function truncateMiddle(text, maxBytes) {
+  if (text === '') return ''
+  if (maxBytes <= 0) {
+    const removed = Buffer.byteLength(text, 'utf8')
+    return marker(Math.ceil(removed / APPROX_BYTES_PER_TOKEN))
+  }
+  const totalBytes = Buffer.byteLength(text, 'utf8')
+  if (totalBytes <= maxBytes) return text
+  const leftBudget = Math.floor(maxBytes / 2)
+  const rightBudget = maxBytes - leftBudget
+  const tailStartTarget = totalBytes - rightBudget
+  let prefixEnd = 0
+  let suffixStart = totalBytes
+  let suffixStarted = false
+  let bytePos = 0
+  for (const ch of text) {
+    const charBytes = Buffer.byteLength(ch, 'utf8')
+    const charEnd = bytePos + charBytes
+    if (charEnd <= leftBudget) { prefixEnd = charEnd; bytePos = charEnd; continue }
+    if (bytePos >= tailStartTarget) {
+      if (!suffixStarted) { suffixStart = bytePos; suffixStarted = true }
+      bytePos = charEnd
+      continue
+    }
+    bytePos = charEnd
+  }
+  if (suffixStart < prefixEnd) suffixStart = prefixEnd
+  const before = text.slice(0, prefixEnd)
+  const after = text.slice(suffixStart)
+  const removedBytes = totalBytes - (Buffer.byteLength(before, 'utf8') + Buffer.byteLength(after, 'utf8'))
+  return before + marker(Math.ceil(removedBytes / APPROX_BYTES_PER_TOKEN)) + after
+}
+
+/** The official "…N tokens truncated…" marker (truncate.rs:131-137). */
+function marker(removedTokens) {
+  return '…' + removedTokens + ' tokens truncated…'
+}
+
+/** Truncate text to a token budget with the official middle-truncation marker. */
 export function truncateTokens(text, maxTokens) {
   if (approxTokens(text) <= maxTokens) return { text, truncated: false }
-  const head = text.slice(0, Math.max(0, maxTokens * 4))
-  return { text: head + TRUNCATION_NOTICE, truncated: true }
+  return { text: truncateMiddle(text, approxBytesForTokens(maxTokens)), truncated: true }
 }
-
 /**
  * codex context_window.rs:74-79 trigger condition.
  * @returns true when compaction must run.

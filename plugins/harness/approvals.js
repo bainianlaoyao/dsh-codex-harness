@@ -22,13 +22,14 @@ export const RETRY_REASON = 'command failed; retry without sandbox?'
 
 /** ReviewDecision vocabulary (protocol.rs:3852-3887). */
 export const REVIEW_DECISION = Object.freeze({
+  // Official serde snake_case wire values (protocol.rs:3852-3887).
   approved: 'approved',
-  approvedExecpolicyAmendment: 'approved-execpolicy-amendment',
-  approvedForSession: 'approved-for-session',
-  approvedMcpPolicyAmendment: 'approved-mcp-policy-amendment',
-  networkPolicyAmendment: 'network-policy-amendment',
+  approvedExecpolicyAmendment: 'approved_execpolicy_amendment',
+  approvedForSession: 'approved_for_session',
+  approvedMcpPolicyAmendment: 'approved_mcp_policy_amendment',
+  networkPolicyAmendment: 'network_policy_amendment',
   denied: 'denied',
-  timedOut: 'timed-out',
+  timedOut: 'timed_out',
   abort: 'abort',
 })
 

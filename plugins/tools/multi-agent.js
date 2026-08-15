@@ -10,7 +10,10 @@
  *   parity, ignored (DSH AgentOptions only carries provider/model/maxTokens).
  * - `resume_agent`: DSH has no pause/resume; a followup with a neutral
  *   continue message starts the next turn on the same conversation.
- * - `send_input.items`: accepted, ignored (followup carries one text message).
+ * - `items`: validated by codex's message-vs-items rules and mapped onto the
+ *   DSH text-only prompt (non-text items render as `[type] <reference>` text).
+ * - agent statuses are the DSH registry vocabulary (running/idle/…), not the
+ *   codex AgentStatus enum; status output shapes match codex's field names.
  *
  * @module dsh-codex/tools/multi-agent
  */
@@ -23,6 +26,75 @@ export const name = 'tool-codex-multi-agent'
 export const inject = ['tools', 'subagents']
 
 const WAIT_POLL_MS = 250
+const MIN_WAIT_TIMEOUT_MS = 10000
+const DEFAULT_WAIT_TIMEOUT_MS = 30000
+const MAX_WAIT_TIMEOUT_MS = 3600000
+
+/** Structured collab input items (codex multi_agents_spec.rs create_collab_input_items_schema). */
+const COLLAB_INPUT_ITEMS_SCHEMA = {
+  type: 'array',
+  description: 'Structured input items. Use this to pass explicit mentions (for example app:// connector paths).',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      type: { type: 'string', description: 'Input item type: text, image, local_image, audio, local_audio, skill, or mention.' },
+      text: { type: 'string', description: 'Text content when type is text.' },
+      image_url: { type: 'string', description: 'Image URL when type is image.' },
+      audio_url: { type: 'string', description: 'Audio data URL when type is audio.' },
+      path: { type: 'string', description: 'Path when type is local_image/local_audio/skill, or structured mention target such as app://<connector-id> or plugin://<plugin-name>@<marketplace-name> when type is mention.' },
+      name: { type: 'string', description: 'Display name when type is skill or mention.' },
+    },
+  },
+}
+
+/** Map codex ThreadId parsing onto DSH's identity SessionId cast. DSH session
+ * ids are unconstrained strings, so the codex "invalid agent id" error only
+ * surfaces if the seam ever rejects a target during the parse. */
+function parseAgentIdTarget(target) {
+  try {
+    return SessionId(target)
+  } catch (err) {
+    throw new Error(`invalid agent id ${target}: ${err}`)
+  }
+}
+
+function parseAgentIdTargets(targets) {
+  if (targets.length === 0) throw new Error('agent ids must be non-empty')
+  return targets.map(parseAgentIdTarget)
+}
+
+/** Validate codex's message-vs-items union and return the canonical input items. */
+function parseCollabInput(message, items) {
+  const hasMessage = message !== undefined
+  const hasItems = items !== undefined
+  if (hasMessage && hasItems) throw new Error('Provide either message or items, but not both')
+  if (!hasMessage && !hasItems) throw new Error('Provide one of: message or items')
+  if (hasMessage) {
+    if (message.trim().length === 0) throw new Error("Empty message can't be sent to an agent")
+    return [{ type: 'text', text: message }]
+  }
+  if (items.length === 0) throw new Error("Items can't be empty")
+  return items
+}
+
+/** Map codex collab input items onto the DSH text-only subagent prompt. */
+function inputItemsToPrompt(inputItems) {
+  return inputItems.map((item) => {
+    if (item.type === 'text' && typeof item.text === 'string') {
+      return { type: 'text', text: item.text }
+    }
+    const reference = item.path ?? item.image_url ?? item.audio_url ?? item.name ?? ''
+    return { type: 'text', text: `[${item.type}] ${reference}` }
+  })
+}
+
+/** Observe one agent's status from the DSH registry. */
+function agentStatusOf(ctx, id) {
+  const agents = ctx.get('agents')
+  const agent = agents?.get(id)
+  return agent?.status ?? 'unknown'
+}
 
 function registerMultiAgentTools(ctx, config) {
   const provider = config.provider ?? 'spawn'
@@ -34,8 +106,10 @@ function registerMultiAgentTools(ctx, config) {
         'Spawn a subagent to work on a task independently. Returns an agent id for send_input / resume_agent / wait_agent / close_agent. ' +
         '(DSH mapping of codex multi_agent_v1.spawn_agent: the child is a continuable subagent on the ' + provider + ' provider.)',
       parameters: {
-        message: { type: 'string', required: true, description: 'The initial task message for the subagent.' },
+        message: { type: 'string', description: 'Initial plain-text task for the new agent. Use either message or items.' },
+        items: COLLAB_INPUT_ITEMS_SCHEMA,
         agent_type: { type: 'string', description: 'Accepted for codex schema parity; ignored (DSH uses the configured provider).' },
+        fork_context: { type: 'boolean', description: 'True forks the current thread history into the new agent; false or omitted starts with only the initial prompt.' },
         model: { type: 'string', description: 'Optional model id for the subagent (maps to AgentOptions.model).' },
         service_tier: { type: 'string', description: 'Accepted for codex schema parity; ignored.' },
         reasoning_effort: { type: 'string', description: 'Accepted for codex schema parity; ignored.' },
@@ -45,8 +119,12 @@ function registerMultiAgentTools(ctx, config) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            agent_id: { type: 'string', required: true },
-            message_id: { type: 'string' },
+            agent_id: { type: 'string', required: true, description: 'Thread identifier for the spawned agent.' },
+            nickname: {
+              oneOf: [{ type: 'string' }, { type: 'null' }],
+              required: true,
+              description: 'User-facing nickname for the spawned agent when available.',
+            },
           },
         },
         render: (_args, value) => [{ type: 'text', text: `spawned agent ${value.agent_id}` }],
@@ -54,20 +132,21 @@ function registerMultiAgentTools(ctx, config) {
       async execute(args, exec) {
         const parent = exec.agent
         if (parent === undefined) throw new Error('spawn_agent requires a calling agent')
+        const prompt = inputItemsToPrompt(parseCollabInput(args.message, args.items))
         const started = await ctx.subagents.startContinuable({
           provider,
           label: 'codex spawn_agent',
           request: {
             label: 'codex spawn_agent',
-            prompt: [{ type: 'text', text: args.message }],
+            prompt,
             parent,
             ...(typeof args.model === 'string' && args.model.length > 0 ? { agentOptions: { model: args.model } } : {}),
           },
           signal: exec.signal,
         })
-        return { agent_id: String(started.childId), ...(started.messageId === undefined ? {} : { message_id: String(started.messageId) }) }
+        return { agent_id: String(started.childId), nickname: null }
       },
-      presentCall: (args) => ({ card: 'generic', title: 'Spawn agent', kind: 'other', rawInput: args.message }),
+      presentCall: (args) => ({ card: 'generic', title: 'Spawn agent', kind: 'other', rawInput: args.message ?? args.items ?? '' }),
     })
   )
 
@@ -79,29 +158,31 @@ function registerMultiAgentTools(ctx, config) {
         'Returns only delivery confirmation (codex multi_agent_v1.send_input).',
       parameters: {
         target: { type: 'string', required: true, description: 'The agent id returned by spawn_agent.' },
-        message: { type: 'string', description: 'The message to deliver.' },
-        items: { type: 'array', description: 'Accepted for codex schema parity; ignored (DSH followup carries one text message).', items: { type: 'json' } },
+        message: { type: 'string', description: 'Legacy plain-text message to send to the agent. Use either message or items.' },
+        items: COLLAB_INPUT_ITEMS_SCHEMA,
         interrupt: { type: 'boolean', description: 'Cancel the target\'s current turn before delivering (default false).' },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
-          properties: { message_id: { type: 'string' } },
+          properties: {
+            submission_id: { type: 'string', required: true, description: 'Identifier for the queued input submission.' },
+          },
         },
         render: (args, _value) => [{ type: 'text', text: `message queued as the next turn for agent ${args.target}` }],
       },
       async execute(args, exec) {
         const parent = exec.agent
         if (parent === undefined) throw new Error('send_input requires a calling agent')
-        const id = SessionId(args.target)
+        const id = parseAgentIdTarget(args.target)
+        const inputItems = parseCollabInput(args.message, args.items)
         if (args.interrupt === true) ctx.subagents.interrupt(id, { kind: 'ancestor', agent: parent })
-        const text = typeof args.message === 'string' && args.message.length > 0 ? args.message : 'Continue.'
-        const messageId = await ctx.subagents.followup(parent, id, [{ type: 'text', text }], {
+        const submissionId = await ctx.subagents.followup(parent, id, inputItemsToPrompt(inputItems), {
           source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id },
           signal: exec.signal,
         })
-        return { message_id: String(messageId) }
+        return { submission_id: String(submissionId) }
       },
       presentCall: (args) => ({ card: 'generic', title: `Send input → agent ${args.target}`, kind: 'other', rawInput: args.message ?? '' }),
     })
@@ -120,19 +201,21 @@ function registerMultiAgentTools(ctx, config) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          properties: { message_id: { type: 'string' } },
+          properties: {
+            status: { type: 'string', required: true, description: 'Agent status observed after the resume request.' },
+          },
         },
         render: (args, _value) => [{ type: 'text', text: `resumed agent ${args.id}` }],
       },
       async execute(args, exec) {
         const parent = exec.agent
         if (parent === undefined) throw new Error('resume_agent requires a calling agent')
-        const id = SessionId(args.id)
-        const messageId = await ctx.subagents.followup(parent, id, [{ type: 'text', text: 'Continue.' }], {
+        const id = parseAgentIdTarget(args.id)
+        await ctx.subagents.followup(parent, id, [{ type: 'text', text: 'Continue.' }], {
           source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id },
           signal: exec.signal,
         })
-        return { message_id: String(messageId) }
+        return { status: agentStatusOf(ctx, id) }
       },
       presentCall: (args) => ({ card: 'generic', title: `Resume agent ${args.id}`, kind: 'other', rawInput: '' }),
     })
@@ -145,59 +228,50 @@ function registerMultiAgentTools(ctx, config) {
         'Wait until the named agents are idle (their current turn settles). Returns each agent\'s observed status. ' +
         '(codex multi_agent_v1.wait_agent; timeout range 10s-1h.)',
       parameters: {
-        agents: { type: 'array', description: 'Agent ids to wait for.', items: { type: 'string' } },
+        targets: { type: 'array', required: true, description: 'Agent ids to wait on. Pass multiple ids to wait for whichever finishes first.', items: { type: 'string' } },
         task_ids: { type: 'array', description: 'Accepted for codex schema parity; ignored.', items: { type: 'string' } },
-        timeout_ms: { type: 'number', description: 'Maximum wait (default 30000, range 10000-3600000).' },
+        timeout_ms: { type: 'number', description: `Timeout in milliseconds. Defaults to ${DEFAULT_WAIT_TIMEOUT_MS}, min ${MIN_WAIT_TIMEOUT_MS}, max ${MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling.` },
       },
       output: {
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            agents: {
-              type: 'array',
-              required: true,
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  id: { type: 'string', required: true },
-                  status: { type: 'string', required: true },
-                },
-              },
-            },
-            timed_out: { type: 'boolean', required: true },
+            status: { type: 'object', required: true, additionalProperties: true, description: 'Final statuses keyed by agent id.' },
+            timed_out: { type: 'boolean', required: true, description: 'Whether the wait call returned due to timeout before any agent reached a final status.' },
           },
         },
         render: (_args, value) => [
           {
             type: 'text',
             text: value.timed_out
-              ? `wait timed out; statuses: ${value.agents.map((entry) => `${entry.id}=${entry.status}`).join(', ')}`
-              : `agents settled: ${value.agents.map((entry) => `${entry.id}=${entry.status}`).join(', ')}`,
+              ? `wait timed out; statuses: ${Object.entries(value.status).map(([id, status]) => `${id}=${status}`).join(', ')}`
+              : `agents settled: ${Object.entries(value.status).map(([id, status]) => `${id}=${status}`).join(', ')}`,
           },
         ],
       },
       async execute(args, exec) {
-        const ids = Array.isArray(args.agents) ? args.agents.filter((id) => typeof id === 'string') : []
-        if (ids.length === 0) return { agents: [], timed_out: false }
+        const ids = parseAgentIdTargets(args.targets)
         const agents = ctx.get('agents')
         if (agents === undefined) throw new Error('wait_agent: the agent registry is unavailable')
-        const timeout = Math.min(Math.max(Number(args.timeout_ms) || 30000, 10000), 3600000)
+        const rawTimeout = args.timeout_ms ?? DEFAULT_WAIT_TIMEOUT_MS
+        if (rawTimeout <= 0) throw new Error('timeout_ms must be greater than zero')
+        const timeout = Math.min(Math.max(rawTimeout, MIN_WAIT_TIMEOUT_MS), MAX_WAIT_TIMEOUT_MS)
         const deadline = Date.now() + timeout
         const statusOf = (id) => {
-          const agent = agents.get(SessionId(id))
-          if (agent === undefined) return 'unknown'
-          return agent.status
+          const agent = agents.get(id)
+          return agent === undefined ? 'unknown' : agent.status
         }
         while (true) {
-          const statuses = ids.map((id) => ({ id, status: statusOf(id) }))
-          if (statuses.every((entry) => entry.status === 'idle' || entry.status === 'unknown')) return { agents: statuses, timed_out: false }
-          if (Date.now() >= deadline) return { agents: statuses, timed_out: true }
+          const statuses = Object.fromEntries(ids.map((id) => [id, statusOf(id)]))
+          if (Object.values(statuses).every((status) => status === 'idle' || status === 'unknown')) {
+            return { status: statuses, timed_out: false }
+          }
+          if (Date.now() >= deadline) return { status: statuses, timed_out: true }
           await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS))
         }
       },
-      presentCall: (args) => ({ card: 'generic', title: 'Wait for agents', kind: 'other', rawInput: args.agents ?? [] }),
+      presentCall: (args) => ({ card: 'generic', title: 'Wait for agents', kind: 'other', rawInput: args.targets ?? [] }),
     })
   )
 
@@ -214,15 +288,19 @@ function registerMultiAgentTools(ctx, config) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          properties: { accepted: { type: 'boolean', required: true } },
+          properties: {
+            previous_status: { type: 'string', required: true, description: 'The agent status observed before shutdown was requested.' },
+          },
         },
         render: (args, _value) => [{ type: 'text', text: `close requested for agent ${args.target}` }],
       },
       execute(args, exec) {
         const parent = exec.agent
         if (parent === undefined) throw new Error('close_agent requires a calling agent')
-        ctx.subagents.interrupt(SessionId(args.target), { kind: 'ancestor', agent: parent })
-        return Promise.resolve({ accepted: true })
+        const id = parseAgentIdTarget(args.target)
+        const previous_status = agentStatusOf(ctx, id)
+        ctx.subagents.interrupt(id, { kind: 'ancestor', agent: parent })
+        return Promise.resolve({ previous_status })
       },
       presentCall: (args) => ({ card: 'generic', title: `Close agent ${args.target}`, kind: 'other', rawInput: '' }),
     })

@@ -2,10 +2,20 @@
  * M1-R2 smoke test for dsh-codex/tools/exec-command.js — mock `ctx.shell`
  * (the host shell seam: resolve + start + background proc handles) with fake
  * processes that settle on timers, so the foreground-completion, yield +
- * write_stdin poll, control-byte, registry-cap, and approval-gate paths all
- * run without a real shell.
+ * write_stdin poll, control-byte, registry-eviction, and approval-gate paths
+ * all run without a real shell.
  *
- * Usage: node dsh-codex/tools/exec-command.smoke.js  (from the profile root)
+ * Semantics under test match codex HEAD 5bc8da6d78 (unified_exec):
+ * - win32 exec_command yield floor 10000 ms (configurable via yieldFloorMs —
+ *   the smoke pins it low to keep the suite fast),
+ * - write_stdin \u0003 interrupts (signal death renders no exit-code
+ *   section); any other non-empty chars throw the StdinClosed error,
+ * - session ids random in 1000..100000; 64-process cap evicts LRU instead
+ *   of failing,
+ * - result text: Chunk ID → Wall time → Process exited → Process running →
+ *   Original token count → Output: → body (context.rs:442-468).
+ *
+ * Usage: node tools/exec-command.smoke.js
  */
 import assert from 'node:assert/strict'
 
@@ -28,8 +38,6 @@ class FakeProc {
           this.status = 'killed'
           this.signal = 'SIGTERM'
         } else {
-          // Real dsh-bash-local contract: a normally finished background
-          // process reports status `completed` (domain: running|completed|killed).
           this.status = 'completed'
           this.exitCode = script.exitCode ?? 0
         }
@@ -61,6 +69,7 @@ function scriptFor(command) {
   return { steps: [[0, 'hi\n']], settleAt: 0 }
 }
 
+const captured = []
 const started = []
 let sandboxMode = 'danger-full-access'
 const approvalLog = []
@@ -96,9 +105,8 @@ const ctx = {
   },
 }
 
-const captured = []
-const { apply } = await import('./exec-command.js')
-apply(ctx, { maxOutputChars: 100000 })
+const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult } = await import('./exec-command.js')
+apply(ctx, { maxOutputBytes: 100000, yieldFloorMs: 250 })
 
 const execCommand = captured.find((t) => t.name === 'exec_command')
 const writeStdin = captured.find((t) => t.name === 'write_stdin')
@@ -113,13 +121,19 @@ const quick = await run(execCommand, { cmd: 'echo hi' })
 assert.equal(quick.exit_code, 0, 'exit code captured (host seam reports `completed`)')
 assert.ok(quick.output.includes('hi'), 'output captured')
 assert.ok(quick.session_id === undefined, 'no session id when completed')
+assert.equal(typeof quick.chunk_id, 'string', 'chunk id generated per call')
+assert.equal(typeof quick.original_token_count, 'number', 'original token count always present')
 assert.equal(started[0].workdir, 'C:/work', 'session cwd forwarded as workdir')
 assert.equal(started[0].dshEnv.DSH_TEST, '1', 'shell env collected')
 
-// Regression (2026-08-15): the real dsh-bash-local handle settles as
-// `completed`, which settled() must accept — otherwise a finished command is
-// misreported as "Process running with session ID N" and every exec_command
-// is followed by a payload-less write_stdin poll.
+// Render shape: Chunk ID → Wall time (4 decimals) → Process exited → Original token count → Output:
+const rendered = renderExecResult(quick)
+assert.ok(/^Chunk ID: [0-9a-f]{6}\n/.test(rendered), 'Chunk ID section first')
+assert.ok(rendered.includes('Wall time: '), 'wall time section')
+assert.ok(rendered.includes('Process exited with code 0'), 'exit-code section')
+assert.ok(rendered.includes('Original token count: '), 'token-count section present even when not truncated (context.rs:460)')
+assert.ok(rendered.endsWith('Output:\nhi\n'), 'Output: label then body')
+
 const quick2 = await run(execCommand, { cmd: 'echo hi', yield_time_ms: 250 })
 assert.equal(quick2.exit_code, 0, 'completed within yield returns exit code')
 assert.ok(quick2.session_id === undefined, 'completed within yield registers no session')
@@ -133,13 +147,18 @@ assert.ok(badShell instanceof Error && /unsupported shell "powershell"/.test(bad
 const goodShell = await run(execCommand, { cmd: 'echo hi', shell: 'git-bash' })
 assert.equal(goodShell.exit_code, 0, 'bash/shell/git-bash accepted and map to the git-bash backend')
 
+// justification without sandbox_permissions is rejected (handlers/mod.rs shared rule)
+const jw = await run(execCommand, { cmd: 'echo hi', justification: 'because' }).catch((error) => error)
+assert.ok(jw instanceof Error && jw.message.includes('justification') && jw.message.includes('require_escalated'), 'justification requires sandbox_permissions')
+
 // ── yield → session id → write_stdin poll ──────────────────────────────────
-const slow = await run(execCommand, { cmd: 'sleep 0.3 && echo done', yield_time_ms: 250 })
+const slow = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
 assert.equal(typeof slow.session_id, 'number', 'yielded session id')
+assert.ok(slow.session_id >= 1000 && slow.session_id < 100000, 'session id in the official 1000..100000 range')
 assert.equal(slow.output, '', 'no output yet at yield')
-const polled = await run(writeStdin, { session_id: slow.session_id, chars: '', yield_time_ms: 5000 })
-assert.equal(polled.exit_code, 0, 'write_stdin poll observes completion')
-assert.ok(polled.output.includes('done'), 'poll returns new output')
+const polled = await run(writeStdin, { session_id: slow.session_id, chars: '', yield_time_ms: 500 })
+assert.ok(polled.session_id === undefined, 'still-running poll returns no exit code')
+assert.ok(polled.output === '', 'no new output in the poll')
 
 // ── delta semantics: only NEW output after the first read ──────────────────
 const trickle = await run(execCommand, { cmd: 'trickle', yield_time_ms: 250 })
@@ -150,32 +169,47 @@ const poll2 = await run(writeStdin, { session_id: trickle.session_id, chars: '',
 assert.equal(poll2.exit_code, 0, 'trickle completed on poll')
 assert.ok(poll2.output.includes('two') && !poll2.output.includes('one'), 'poll returns only the new chunk')
 
-// ── control bytes: Ctrl-C kills, other chars are not deliverable ───────────
+// ── control bytes: \u0003 interrupts (signal death → no exit-code section);
+// any other chars are the official StdinClosed error ───────────────────────
 const runaway = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
-assert.equal(typeof runaway.session_id, 'number', 'never-settling session yielded')
 const ctrlc = await run(writeStdin, { session_id: runaway.session_id, chars: '\u0003', yield_time_ms: 2000 })
-assert.equal(ctrlc.exit_code, null, 'Ctrl-C kills: exit code null')
-assert.ok(ctrlc.output.includes('[interrupt sent'), 'interrupt notice delivered')
+assert.equal(ctrlc.exit_code, undefined, 'Ctrl-C kills: exit code omitted (Option<i32> None)')
+assert.ok(!ctrlc.output.includes('[interrupt'), 'no synthetic interrupt notice (codex emits none)')
+assert.ok(!renderExecResult(ctrlc).includes('Process exited'), 'signal death renders no exit-code section')
 
 const runaway2 = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
-const stray = await run(writeStdin, { session_id: runaway2.session_id, chars: 'hello', yield_time_ms: 250 })
-assert.ok(stray.output.includes('not deliverable'), 'non-control stdin reported not deliverable (no PTY on win32)')
-const killedNote = await run(writeStdin, { session_id: runaway2.session_id, chars: '\u0003', yield_time_ms: 2000 })
-assert.ok(killedNote.output.includes('[process terminated by signal: SIGTERM]'), 'killed note in final output')
+const stray = await run(writeStdin, { session_id: runaway2.session_id, chars: 'hello', yield_time_ms: 250 }).catch((error) => error)
+assert.ok(stray instanceof Error, 'non-control stdin rejected')
+assert.ok(stray.message === 'write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open', 'StdinClosed error message verbatim (errors.rs)')
+const aliveAfterStray = await run(writeStdin, { session_id: runaway2.session_id, chars: '', yield_time_ms: 500 })
+assert.ok(aliveAfterStray.session_id === undefined || aliveAfterStray.exit_code === null, 'stray write did not kill the session')
+await run(writeStdin, { session_id: runaway2.session_id, chars: '\u0003', yield_time_ms: 2000 })
 
 const unknown = await run(writeStdin, { session_id: 9999, chars: '' }).catch((error) => error)
-assert.ok(unknown instanceof Error && /unknown exec session/.test(unknown.message), 'unknown session rejected')
+assert.ok(unknown instanceof Error && /Unknown process id 9999/.test(unknown.message), 'unknown session uses the official message')
 
-// ── registry cap ───────────────────────────────────────────────────────────
-const registry = await (async () => {
-  const ids = []
-  for (let i = 0; i < 65; i++) {
-    const result = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
-    ids.push(result.session_id)
-  }
-  return ids
-})().catch((error) => error)
-assert.ok(registry instanceof Error, 'registry cap enforced at 64 sessions')
+// ── registry cap: 64 processes → LRU eviction (never an error) ─────────────
+const ids = []
+for (let i = 0; i < 65; i++) {
+  const result = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
+  assert.equal(typeof result.session_id, 'number', 'session ' + i + ' allocated')
+  ids.push(result.session_id)
+}
+assert.equal(new Set(ids).size, 65, '65 sessions allocated')
+const evicted = await run(writeStdin, { session_id: ids[0], chars: '' }).catch((error) => error)
+assert.ok(evicted instanceof Error && /Unknown process id/.test(evicted.message), 'oldest session evicted at the cap')
+// the most recent sessions survive
+const newestAlive = await run(writeStdin, { session_id: ids[64], chars: '\u0003', yield_time_ms: 1000 })
+assert.equal(newestAlive.exit_code, undefined, 'newest session survives the cap (signal death omits exit code)')
+
+// ── truncation helpers (official string/truncate.rs + output-truncation) ────
+assert.equal(approxTokens('hello'), 2, 'approx tokens = ceil(bytes/4)')
+assert.equal(approxTokens(''), 0, 'empty text → 0 tokens')
+const mid = truncateMiddle('0123456789', 4, true)
+assert.ok(mid.startsWith('01') && mid.endsWith('89'), 'head and tail preserved')
+assert.ok(/…\d+ tokens truncated…/.test(mid), 'token-truncation marker present')
+const ft = formattedTruncateText('a\nb\nc\nd\ne\nf\ng\nh\ni\nj', 2)
+assert.ok(ft.startsWith('Warning: truncated output (original token count: 5)\nTotal output lines: 10\n\n'), 'formatted truncation prefix: tokens=ceil(19/4)=5, lines=10')
 
 // ── approval gate ───────────────────────────────────────────────────────────
 assert.equal(approvalLog.length, 0, 'safe command (echo) ran without approval')
@@ -216,11 +250,23 @@ await run(execCommand, { cmd: 'curl http://x', sandbox_permissions: 'require_esc
 assert.equal(approvalLog[approvalLog.length - 1].reason, 'needs network', 'escalation justification reaches the UI under a restricted sandbox')
 sandboxMode = 'danger-full-access'
 
-// ── schema parity spot checks ──────────────────────────────────────────────
+// ── schema parity spot checks (shell_spec.rs) ──────────────────────────────
 const params = execCommand.parameters.properties ?? {}
-for (const key of ['cmd', 'workdir', 'yield_time_ms', 'max_output_tokens', 'sandbox_permissions', 'justification', 'prefix_rule'])
-  assert.ok(params[key] !== undefined, `exec_command has ${key}`)
+for (const key of ['cmd', 'workdir', 'tty', 'yield_time_ms', 'max_output_tokens', 'shell', 'login', 'sandbox_permissions', 'justification', 'prefix_rule'])
+  assert.ok(params[key] !== undefined, 'exec_command has ' + key)
+assert.ok((execCommand.parameters.required ?? []).includes('cmd'), 'cmd required')
+assert.equal(params.sandbox_permissions.enum.join(','), 'use_default,require_escalated', 'sandbox_permissions enum matches the default tool')
+assert.equal(execCommand.description, 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\nWindows safety rules:\n- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.\n- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.\n- When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.', 'exec_command description verbatim (win32)')
+assert.equal(writeStdin.description, 'Writes characters to an existing unified exec session and returns recent output.', 'write_stdin description verbatim')
 const stdinParams = writeStdin.parameters.properties ?? {}
 assert.ok((writeStdin.parameters.required ?? []).includes('session_id'), 'write_stdin session_id required')
+assert.equal(stdinParams.chars.description, 'Bytes to write to stdin. Defaults to empty, which polls without writing.', 'chars description verbatim')
+assert.equal(stdinParams.yield_time_ms.description, 'Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.', 'yield_time_ms description verbatim')
+// output schema = official unified_exec_output_schema
+const outProps = execCommand.output.schema.properties
+for (const key of ['chunk_id', 'wall_time_seconds', 'exit_code', 'session_id', 'original_token_count', 'output'])
+  assert.ok(outProps[key] !== undefined, 'output schema has ' + key)
+assert.ok((execCommand.output.schema.required ?? []).includes('wall_time_seconds'), 'wall_time_seconds required')
+assert.ok((execCommand.output.schema.required ?? []).includes('output'), 'output required')
 
 console.log('exec-command smoke test: ALL PASS')

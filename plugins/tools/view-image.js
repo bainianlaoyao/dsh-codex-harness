@@ -18,8 +18,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'tool-codex-view-image'
 export const inject = ['tools', 'fs']
 
-/** 200KB cap on the image payload; M2 adds a visual online channel for larger images. */
-const MAX_IMAGE_BYTES = 200 * 1024
+/** Generous read bound for the fs seam. Codex decodes the whole image with no
+ *  size cap; the DSH seam requires a finite `maxBytes`, so this only bounds
+ *  pathological inputs rather than rejecting ordinary large images. */
+const MAX_IMAGE_READ_BYTES = 100 * 1024 * 1024
 /** 16KB threshold below which the render text inlines the full data URL. */
 const INLINE_TEXT_BYTES = 16 * 1024
 /** Prefix length of the data URL kept in render text for larger images. */
@@ -50,6 +52,11 @@ function detectImageMime(bytes) {
     return 'image/webp'
   }
   return null
+}
+
+/** Best-effort human-readable rendering of a thrown seam error. */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function renderViewImage(_args, value) {
@@ -88,12 +95,11 @@ export function apply(ctx) {
             image_url: { type: 'string', required: true, description: 'Data URL for the loaded image.' },
             detail: {
               type: 'string',
-              required: true,
               enum: ['high', 'original'],
               description: 'Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved.',
             },
-            mime: { type: 'string', required: true, description: 'Detected image MIME type.' },
-            bytes: { type: 'integer', required: true, description: 'Size of the image payload in bytes.' },
+            mime: { type: 'string', description: 'Detected image MIME type (internal, for the attachment path).' },
+            bytes: { type: 'integer', description: 'Size of the image payload in bytes (internal).' },
             image: {
               type: 'object',
               additionalProperties: false,
@@ -119,39 +125,47 @@ export function apply(ctx) {
           throw new Error('view_image: no working directory on the owning agent session')
         }
         const detail = args.detail ?? 'high'
-        const target = await ctx.fs.resolve(args.path, { cwd })
-        const mediaType = imageMediaTypeForPath(target.displayPath)
-        if (mediaType === undefined) throw new Error('view_image only accepts PNG/JPEG/GIF/WebP files')
+        let target
+        try {
+          target = await ctx.fs.resolve(args.path, { cwd })
+        } catch (error) {
+          throw new Error(
+            `unable to resolve image path \`${args.path}\` against environment cwd \`${cwd}\`: ${errorMessage(error)}`
+          )
+        }
         const attachments = ctx.get('attachments')
-        const byteCap = Math.min(MAX_IMAGE_BYTES, attachments?.imageLimits?.maxImageBytes ?? MAX_IMAGE_BYTES)
         let bytes
         try {
-          bytes = await ctx.fs.readBytes(target, exec.signal, byteCap)
+          bytes = await ctx.fs.readBytes(target, exec.signal, MAX_IMAGE_READ_BYTES)
         } catch (error) {
-          if (error !== null && typeof error === 'object' && error.code === 'FS_TOO_LARGE') {
-            throw new Error(`view_image: image exceeds the ${byteCap} byte limit`)
+          const code = error !== null && typeof error === 'object' ? error.code : undefined
+          if (code === 'FS_NOT_FOUND') {
+            throw new Error(`unable to locate image at \`${args.path}\`: ${errorMessage(error)}`)
           }
-          throw error
-        }
-        if (bytes.byteLength > byteCap) {
-          throw new Error(`view_image: image exceeds the ${byteCap} byte limit (${bytes.byteLength} bytes)`)
+          if (code === 'FS_NOT_REGULAR_FILE') {
+            throw new Error(`image path \`${args.path}\` is not a file`)
+          }
+          throw new Error(`unable to read image at \`${args.path}\`: ${errorMessage(error)}`)
         }
         const mime = detectImageMime(bytes)
         if (mime === null) {
-          throw new Error('view_image: file is not a supported image (PNG/JPEG/GIF/WebP)')
+          throw new Error('unable to process image: invalid or unsupported image data')
         }
         const base64 = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
-        const imageUrl = `data:${mime};base64,${base64}`
+        const imageUrl = `data:application/octet-stream;base64,${base64}`
         let image
         if (attachments !== undefined) {
-          const ref = await attachments.saveImage({ data: bytes, mediaType: mime, name: basename(target.displayPath) })
-          image = {
-            attachmentId: ref.attachmentId,
-            mediaType: ref.mediaType,
-            bytes: ref.bytes,
-            width: ref.width,
-            height: ref.height,
-            ...(ref.name === undefined ? {} : { name: ref.name }),
+          const maxImageBytes = attachments.imageLimits?.maxImageBytes
+          if (maxImageBytes === undefined || bytes.byteLength <= maxImageBytes) {
+            const ref = await attachments.saveImage({ data: bytes, mediaType: mime, name: basename(target.displayPath) })
+            image = {
+              attachmentId: ref.attachmentId,
+              mediaType: ref.mediaType,
+              bytes: ref.bytes,
+              width: ref.width,
+              height: ref.height,
+              ...(ref.name === undefined ? {} : { name: ref.name }),
+            }
           }
         }
         return { image_url: imageUrl, detail, mime, bytes: bytes.byteLength, ...(image === undefined ? {} : { image }) }
@@ -159,15 +173,6 @@ export function apply(ctx) {
       presentCall: (args) => ({ card: 'generic', title: 'View image', kind: 'other', rawInput: args.path }),
     })
   )
-}
-
-function imageMediaTypeForPath(path) {
-  const lower = path.toLowerCase()
-  if (lower.endsWith('.png')) return 'image/png'
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
-  if (lower.endsWith('.gif')) return 'image/gif'
-  if (lower.endsWith('.webp')) return 'image/webp'
-  return undefined
 }
 
 function basename(path) {

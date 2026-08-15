@@ -96,8 +96,9 @@ function isSafeGit(argv) {
 }
 
 function isSafeSedN(argv) {
-  // sed -n {N|M,N}p [files...]
-  if (argv.length < 4 || argv[1] !== '-n') return false
+  // Official is_safe_to_call_with_exec (is_safe_command.rs:159-168):
+  // "sed -n {N|M,N}p [files...]" with argv.len <= 4 (up to one file operand).
+  if (argv.length > 4 || argv[1] !== '-n') return false
   const spec = argv[2]
   if (!/^\d+(,\d+)?p$/.test(spec)) return false
   return true
@@ -128,10 +129,21 @@ export function parseBashLc(argv) {
   // Split on top-level `; && || |` and newlines; each segment is one plain
   // command, and callers check every segment against the whitelist (codex
   // checks each parsed command individually — `ls && rm -rf /` is unsafe).
-  const parts = script
-    .split(/(?<!['"`])(?:;|\n|&&|\|\||\|)(?!['"`])/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
+  const opRe = /(?<!['"`])(?:;|\n|&&|\|\||\|)(?!['"`])/g
+  const parts = script.split(opRe).map((part) => part.trim())
+  // Empty command positions mirror tree-sitter parse errors (bash.rs tests:
+  // `ls &&`, `&& ls`, `ls ;; pwd`, `ls | | wc` all reject). A trailing
+  // `;` or newline is a valid empty statement, so a trailing empty segment
+  // produced by those two operators is tolerated.
+  const ops = script.match(opRe) ?? []
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].length > 0) continue
+    const op = i === 0 ? null : ops[i - 1]
+    const isLast = i === parts.length - 1
+    if (op === null) return null // leading operator
+    if (isLast && (op === ';' || op === '\n')) continue
+    return null
+  }
   if (parts.length === 0) return null
   return parts.map((part) => tokenizeCommand(part))
 }
@@ -352,7 +364,10 @@ export function canonicalize(argv) {
   const inner = parseBashLc(argv)
   if (inner !== null) {
     if (inner.length === 1) return inner[0]
-    return ['__codex_shell_script__', executableName(argv[0]), argv[2]]
+    // Official canonicalize_command_for_approval (command_canonicalization.rs:
+    // 21-28): the second element is the shell FLAG ("-lc"/"-c"), so wrapper
+    // path differences do not change the approval-cache key.
+    return ['__codex_shell_script__', argv[1], argv[2]]
   }
   return argv
 }
@@ -371,8 +386,18 @@ export function canonicalize(argv) {
  * @returns {decision, reason} — reason is a stable classification tag.
  */
 export function classify(argv, { policy = 'on-request', sandboxRestricted = false, requestsEscalation = false, platform = process.platform } = {}) {
-  if (platform === 'win32' && isSafeWindowsCommand(argv)) return { decision: DECISION.allow, reason: 'known-safe' }
-  if (isSafeCommand(argv, { platform })) return { decision: DECISION.allow, reason: 'known-safe' }
+  // Known-safe early-allow applies only outside escalation requests under a
+  // restricted sandbox: codex render_decision_for_unmatched_command falls
+  // through to the policy branch, and the Restricted branch prompts when
+  // sandbox_permissions.requests_sandbox_override() (exec_policy.rs:800-811).
+  if (platform === 'win32' && isSafeWindowsCommand(argv)) {
+    if (sandboxRestricted && requestsEscalation) return { decision: DECISION.prompt, reason: 'known-safe-escalation' }
+    return { decision: DECISION.allow, reason: 'known-safe' }
+  }
+  if (isSafeCommand(argv, { platform })) {
+    if (sandboxRestricted && requestsEscalation) return { decision: DECISION.prompt, reason: 'known-safe-escalation' }
+    return { decision: DECISION.allow, reason: 'known-safe' }
+  }
   if (isDangerousCommand(argv, { platform })) {
     if (policy === 'never') return { decision: DECISION.forbidden, reason: 'dangerous' }
     return { decision: DECISION.prompt, reason: 'dangerous' }

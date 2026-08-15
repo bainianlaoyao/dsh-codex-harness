@@ -2,21 +2,29 @@
  * dsh-codex M1 — `apply_patch` freeform file editor.
  *
  * Codex-parity patch language (HEAD 5bc8da6d78, apply_patch.lark +
- * codex-rs/apply-patch/src/{parser,streaming_parser,file_update,seek_sequence}.rs)
- * re-implemented in JS over the DSH `ctx.fs` seam: Add/Update/Delete/Move hunks
- * with @@-separated chunks, context/old-line seeking, end-of-file pinning, and
- * codex's always-active lenient `<<EOF` heredoc stripping. Missing parent
- * directories are created recursively (codex
- * write_file_with_missing_parent_retry).
+ * codex-rs/apply-patch/src/{parser,streaming_parser,file_update,seek_sequence,
+ * invocation,lib}.rs) re-implemented in JS over the DSH `ctx.fs` seam:
+ * Add/Update/Delete/Move hunks with @@-separated chunks, context/old-line
+ * seeking, end-of-file pinning, the `*** Environment ID:` marker (parsed and
+ * validated, then ignored — this deployment has one environment), and codex's
+ * always-active lenient `<<EOF` heredoc stripping.
  *
- * FREEFORM fidelity: the tool description is codex's verbatim string
- * (codex-rs/core/src/tools/handlers/apply_patch_spec.rs:20). On the
- * `openai-responses` LLM route (dsh-codex/llm-responses.js) apply_patch is
- * declared as a Responses `custom` tool with codex's lark grammar, so the
- * model emits the raw patch text with no JSON wrapper — the adapter converts
- * it to the harness's internal `{patch: ...}` arguments transport. On the
- * chat-completions route (llm-openai.js) the same schema degrades to a JSON
- * function call (chat-completions has no custom-tool type).
+ * Handler semantics (core/src/tools/handlers/apply_patch.rs):
+ * - parse errors and verification errors are wrapped in
+ *   "apply_patch verification failed: {err}";
+ * - the whole patch is VERIFIED against the filesystem before anything is
+ *   written (try_verify_apply_patch_args) — a failing patch has no side
+ *   effects; verification rejects duplicate resolved paths with
+ *   "invalid patch: multiple operations target {abs}";
+ * - all file errors carry the resolved ABSOLUTE native path and the Rust io
+ *   error spelling ("No such file or directory (os error 2)" for ENOENT);
+ * - safety rejections ("empty patch") surface as "patch rejected: empty
+ *   patch" WITHOUT the verification prefix (safety.rs assess_patch_safety);
+ * - success renders the exec-shell wrapper of the standalone:
+ *   "Exit code: 0 / Wall time: {1-decimal} seconds / Output:" +
+ *   print_summary "Success. Updated the following files:" + A/M/D lines
+ *   grouped added → modified → deleted (lib.rs print_summary + tools/mod.rs
+ *   format_exec_output_for_model: wall time rounded to 1 decimal).
  *
  * @module dsh-codex/tools/apply-patch
  */
@@ -34,6 +42,7 @@ const DEL = '*** Delete File: '
 const UPD = '*** Update File: '
 const MOVE = '*** Move to: '
 const EOF_LINE = '*** End of File'
+const ENV_ID = '*** Environment ID:'
 const CTX = '@@ '
 const INVALID_HEADER = (l) =>
   `'${l}' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'`
@@ -43,14 +52,14 @@ const hunkErr = (at, message) => new Error(`invalid hunk at line ${at}, ${messag
 const patchErr = (message) => new Error(`invalid patch: ${message}`)
 
 /**
- * Parse a patch into hunks (`{kind:'add',path,contents}`, `{kind:'delete',path}`,
- * `{kind:'update',path,movePath,chunks}`), porting the codex StreamingPatchParser
- * state machine with its messages and line numbers.
- * @param {string} patchText - raw freeform patch argument.
- * @returns {object[]} parsed hunks.
+ * Parse a patch into hunks, porting the codex StreamingPatchParser state
+ * machine with its messages and line numbers. The parser also accepts the
+ * "*** Environment ID: {id}" marker after the Begin Patch header
+ * (streaming_parser.rs:84-101): at most once, non-empty.
+ * @returns {{ hunks: object[], environmentId: string|null }}
  */
 function parsePatch(patchText) {
-  let lines = patchText.trim().split('\n').map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
+  let lines = patchText.trim().split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
   const first = lines[0]?.trim()
   const last = lines[lines.length - 1]?.trim()
   if (first !== BEGIN || last !== END) {
@@ -73,6 +82,7 @@ function parsePatch(patchText) {
   const hunks = []
   let mode = 'not-started'
   let updateAt = 0
+  let environmentId = null
   const lastChunk = (h) => h.chunks[h.chunks.length - 1]
   const empty = (c) => c !== undefined && c.oldLines.length === 0 && c.newLines.length === 0
   const chunk = (context) => ({ changeContext: context, oldLines: [], newLines: [], isEndOfFile: false })
@@ -84,10 +94,10 @@ function parsePatch(patchText) {
     const h = hunks[hunks.length - 1]
     if (!h || h.kind !== 'update') return
     if (h.chunks.length === 0 && mode === 'update') throw hunkErr(updateAt, `Update file hunk for path '${h.path}' is empty`)
-    if (empty(lastChunk(h))) throw hunkErr(at, line === END ? 'Update hunk does not contain any lines' : UNEXPECTED(line))
+    if (empty(lastChunk(h))) throw hunkErr(at, line === END ? "Update hunk does not contain any lines" : UNEXPECTED(line))
   }
   const headerOrEnd = (line, at) => {
-    if (line === END) { ensure(line, at); mode = 'ended'; return true }
+    if (line === END) { ensure(line, at); mode = "ended"; return true }
     if (line.startsWith(ADD)) { ensure(line, at); hunks.push({ kind: 'add', path: line.slice(ADD.length), contents: [] }); mode = 'add'; return true }
     if (line.startsWith(DEL)) { ensure(line, at); hunks.push({ kind: 'delete', path: line.slice(DEL.length) }); mode = 'delete'; return true }
     if (line.startsWith(UPD)) { ensure(line, at); hunks.push({ kind: 'update', path: line.slice(UPD.length), movePath: null, chunks: [] }); mode = 'update'; updateAt = at; return true }
@@ -98,11 +108,26 @@ function parsePatch(patchText) {
     const raw = lines[i]
     const trimmed = raw.trim()
     const at = i + 1
+    // codex finish() accepts the final line as the End marker after trimming,
+    // so surrounding whitespace on "*** End Patch" is tolerated (scenario 020).
+    if (i === lines.length - 1 && trimmed === END) {
+      ensure(trimmed, at)
+      mode = "ended"
+      continue
+    }
     if (mode === 'not-started') {
-      if (trimmed === BEGIN) { mode = 'started'; continue }
+      if (trimmed === BEGIN) { mode = "started"; continue }
       throw patchErr("The first line of the patch must be '*** Begin Patch'")
     }
     if (mode === 'started' || mode === 'add' || mode === 'delete') {
+      if (trimmed.startsWith(ENV_ID)) {
+        // *** Environment ID: {id} — at most once, non-empty (streaming_parser.rs:84-101).
+        if (environmentId !== null) throw patchErr("apply_patch environment_id cannot be specified more than once")
+        const id = trimmed.slice(ENV_ID.length).trim()
+        if (id === "") throw patchErr("apply_patch environment_id cannot be empty")
+        environmentId = id
+        continue
+      }
       if (headerOrEnd(trimmed, at)) continue
       if (mode === 'add' && raw.startsWith('+')) {
         hunks[hunks.length - 1].contents.push(raw.slice(1))
@@ -123,7 +148,7 @@ function parsePatch(patchText) {
       if (line === '@@') { h.chunks.push(chunk(null)); continue }
       if (line.startsWith(CTX)) { h.chunks.push(chunk(line.slice(CTX.length))); continue }
       if (line === EOF_LINE) {
-        if (empty(lastChunk(h))) throw hunkErr(at, 'Update hunk does not contain any lines')
+        if (empty(lastChunk(h))) throw hunkErr(at, "Update hunk does not contain any lines")
         lastChunk(h).isEndOfFile = true
         continue
       }
@@ -138,7 +163,7 @@ function parsePatch(patchText) {
     throw patchErr("The last line of the patch must be '*** End Patch'")
   }
   if (mode !== 'ended') throw patchErr("The last line of the patch must be '*** End Patch'")
-  return hunks
+  return { hunks, environmentId }
 }
 
 /** codex seek_sequence::normalise — common Unicode punctuation → ASCII. */
@@ -190,14 +215,15 @@ function seekSequence(lines, pattern, start, eof) {
  * Compute `[start, oldLen, newLines]` replacements for one file's chunks
  * (codex file_update::compute_replacements, NormalizeToLf: pure insertions
  * append at end-of-file, before the trailing '' sentinel when present).
+ * `displayPath` is the resolved absolute native path used in errors.
  */
-function computeReplacements(lines, path, chunks) {
+function computeReplacements(lines, displayPath, chunks) {
   const out = []
   let index = 0
   for (const c of chunks) {
     if (c.changeContext !== null) {
       const at = seekSequence(lines, [c.changeContext], index, false)
-      if (at === null) throw new Error(`Failed to find context '${c.changeContext}' in ${path}`)
+      if (at === null) throw new Error(`Failed to find context '${c.changeContext}' in ${displayPath}`)
       index = at + 1
     }
     if (c.oldLines.length === 0) {
@@ -213,7 +239,7 @@ function computeReplacements(lines, path, chunks) {
       if (fresh[fresh.length - 1] === '') fresh = fresh.slice(0, -1)
       at = seekSequence(lines, pattern, index, c.isEndOfFile)
     }
-    if (at === null) throw new Error(`Failed to find expected lines in ${path}:\n${c.oldLines.join('\n')}`)
+    if (at === null) throw new Error(`Failed to find expected lines in ${displayPath}:\n${c.oldLines.join('\n')}`)
     out.push([at, pattern.length, [...fresh]])
     index = at + pattern.length
   }
@@ -221,10 +247,10 @@ function computeReplacements(lines, path, chunks) {
 }
 
 /** Derive new file contents after applying `chunks` (NormalizeToLf mode). */
-function deriveNewContents(original, path, chunks) {
+function deriveNewContents(original, displayPath, chunks) {
   const lines = original.split('\n')
   if (lines[lines.length - 1] === '') lines.pop()
-  const replacements = computeReplacements(lines, path, chunks)
+  const replacements = computeReplacements(lines, displayPath, chunks)
   for (let r = replacements.length - 1; r >= 0; r--) {
     const [at, len, fresh] = replacements[r]
     lines.splice(at, Math.min(len, Math.max(0, lines.length - at)))
@@ -247,12 +273,95 @@ function assertContained(ctx, cwdTarget, target, patchPath) {
   }
 }
 
+/** Rust io::Error Display for common Node error codes (ENOENT first). */
+function ioErrorText(error) {
+  if (error?.code === 'ENOENT') return 'No such file or directory (os error 2)'
+  if (error?.code === 'EACCES') return 'Permission denied (os error 13)'
+  if (error?.code === 'EISDIR') return 'Is a directory (os error 21)'
+  if (error?.code === 'ENOTDIR') return 'Not a directory (os error 20)'
+  if (error?.code === 'EEXIST') return 'File exists (os error 17)'
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Resolve one hunk target to an absolute native path (Hunk::resolve_path):
+ * returns the fs target and its display path (native absolute), or throws
+ * the official resolution error.
+ */
+async function resolveTarget(ctx, patchPath, cwd) {
+  const target = await ctx.fs.resolve(patchPath, { cwd })
+  return { target, displayPath: target.displayPath ?? target.path ?? patchPath }
+}
+
+/**
+ * Verification stage (try_verify_apply_patch_args + unified_diff_from_chunks):
+ * resolves and reads every hunk WITHOUT writing, rejects duplicate resolved
+ * paths, and derives the new contents. A failure here leaves no side
+ * effects on the filesystem.
+ * @returns {object[]} verified operations [{kind, target, displayPath, newContent?}]
+ */
+async function verifyHunks(ctx, hunks, cwd) {
+  const cwdTarget = await ctx.fs.resolve(cwd, { cwd })
+  const seen = new Map()
+  const ops = []
+  for (const hunk of hunks) {
+    const { target, displayPath } = await resolveTarget(ctx, hunk.path, cwd)
+    const key = displayPath
+    if (seen.has(key)) throw new Error(`invalid patch: multiple operations target ${key}`)
+    seen.set(key, true)
+    if (hunk.kind === "add") {
+      ops.push({ kind: "add", target, displayPath, rawPath: hunk.path, contents: hunk.contents })
+      continue
+    }
+    if (hunk.kind === "delete") {
+      assertContained(ctx, cwdTarget, target, hunk.path)
+      // codex verifies a delete by READING the target (invocation.rs:246-253):
+      // a directory therefore fails here with "Failed to read ... Is a directory".
+      try {
+        await ctx.fs.readText(target)
+      } catch (error) {
+        throw new Error(`Failed to read ${displayPath}: ${ioErrorText(error)}`)
+      }
+      ops.push({ kind: "delete", target, displayPath, rawPath: hunk.path })
+      continue
+    }
+    // update (and move)
+    let info
+    try {
+      info = await ctx.fs.stat(target)
+    } catch (error) {
+      throw new Error(`Failed to read file to update ${displayPath}: ${ioErrorText(error)}`)
+    }
+    if (info === undefined) throw new Error(`Failed to read file to update ${displayPath}: No such file or directory (os error 2)`)
+    let original
+    try {
+      original = await ctx.fs.readText(target)
+    } catch (error) {
+      throw new Error(`Failed to read file to update ${displayPath}: ${ioErrorText(error)}`)
+    }
+    let newContent
+    try {
+      newContent = deriveNewContents(original, displayPath, hunk.chunks)
+    } catch (error) {
+      throw error; // Failed to find context / expected lines — already official text
+    }
+    if (hunk.movePath !== null) {
+      const dest = await resolveTarget(ctx, hunk.movePath, cwd)
+      if (dest.displayPath !== key) {
+        if (seen.has(dest.displayPath)) throw new Error(`invalid patch: multiple operations target ${dest.displayPath}`)
+        seen.set(dest.displayPath, true)
+      }
+      ops.push({ kind: "update", target, displayPath, rawPath: hunk.movePath, newContent, moveTo: dest })
+    } else {
+      ops.push({ kind: "update", target, displayPath, rawPath: hunk.path, newContent })
+    }
+  }
+  return ops
+}
+
 /**
  * Create the target's parent directories when missing (codex
- * write_file_with_missing_parent_retry, apply-patch/src/lib.rs:726-740 —
- * recursive create). The dsh FileSystem has no directory primitive, so the
- * directory itself is created on the backend's processPath; the subsequent
- * writeText still goes through ctx.fs and its sandbox policy.
+ * write_file_with_missing_parent_retry, apply-patch/src/lib.rs:726-740).
  */
 async function ensureParentDirectory(ctx, target, cwd) {
   const parent = await ctx.fs.resolve(parentDir(target.displayPath), { cwd })
@@ -261,60 +370,50 @@ async function ensureParentDirectory(ctx, target, cwd) {
     if (info.type !== 'directory') throw new Error(`Failed to write file ${target.displayPath}: a non-directory exists at its parent path`)
     return
   }
-  // Backend-provided primitive when present (testable without touching the
-  // real filesystem); the shipped backends expose none, so fall back to
-  // node mkdir on the backend's processPath.
-  if (typeof ctx.fs.mkdir === 'function') {
+  if (typeof ctx.fs.mkdir === "function") {
     await ctx.fs.mkdir(parent, { recursive: true })
     return
   }
   await mkdir(ctx.fs.processPath(parent), { recursive: true })
 }
 
-/** Remove a target via the backend `delete` when present, else fs.rm (caller containment-checked). */
+/** Remove a target via the backend `delete` when present, else fs.rm. */
 async function removeTarget(ctx, target) {
-  if (typeof ctx.fs.delete === 'function') return ctx.fs.delete(target)
+  if (typeof ctx.fs.delete === "function") return ctx.fs.delete(target)
   await rm(ctx.fs.processPath(target), { recursive: false, force: false })
 }
 
-/** Apply parsed hunks in order through ctx.fs; returns [{path, action}]. */
-async function applyHunks(ctx, hunks, cwd) {
+/** Apply verified operations through ctx.fs; returns [{path, action}]. */
+async function applyOps(ctx, ops, cwd) {
   const files = []
-  const cwdTarget = await ctx.fs.resolve(cwd, { cwd })
-  for (const hunk of hunks) {
-    if (hunk.kind === 'add') {
-      const target = await ctx.fs.resolve(hunk.path, { cwd })
-      await ensureParentDirectory(ctx, target, cwd)
-      await ctx.fs.writeText(target, hunk.contents.map((line) => `${line}\n`).join(''))
-      files.push({ path: hunk.path, action: 'A' })
-    } else if (hunk.kind === 'delete') {
-      const target = await ctx.fs.resolve(hunk.path, { cwd })
-      assertContained(ctx, cwdTarget, target, hunk.path)
-      const info = await ctx.fs.stat(target)
-      if (info === undefined) throw new Error(`Failed to delete file ${hunk.path}: file does not exist`)
-      if (info.type !== 'file') throw new Error(`Failed to delete file ${hunk.path}: not a regular file`)
-      await removeTarget(ctx, target)
-      files.push({ path: hunk.path, action: 'D' })
+  for (const op of ops) {
+    if (op.kind === "add") {
+      await ensureParentDirectory(ctx, op.target, cwd)
+      await ctx.fs.writeText(op.target, op.contents.map((line) => `${line}\n`).join(""))
+      files.push({ path: op.rawPath, action: "A" })
+    } else if (op.kind === "delete") {
+      await removeTarget(ctx, op.target)
+      files.push({ path: op.rawPath, action: "D" })
     } else {
-      const target = await ctx.fs.resolve(hunk.path, { cwd })
-      const info = await ctx.fs.stat(target)
-      if (info === undefined) throw new Error(`Failed to read file to update ${hunk.path}: file does not exist`)
-      if (info.type !== 'file') throw new Error(`Failed to update ${hunk.path}: not a regular file`)
-      const newContent = deriveNewContents(await ctx.fs.readText(target), hunk.path, hunk.chunks)
-      if (hunk.movePath !== null) {
+      if (op.moveTo !== undefined) {
         // codex reports the move DESTINATION in the summary (Hunk::path()).
-        const dest = await ctx.fs.resolve(hunk.movePath, { cwd })
-        await ensureParentDirectory(ctx, dest, cwd)
-        await ctx.fs.writeText(dest, newContent)
-        await removeTarget(ctx, target)
-        files.push({ path: hunk.movePath, action: 'M' })
+        await ensureParentDirectory(ctx, op.moveTo.target, cwd)
+        await ctx.fs.writeText(op.moveTo.target, op.newContent)
+        await removeTarget(ctx, op.target)
+        files.push({ path: op.rawPath, action: "M" })
       } else {
-        await ctx.fs.writeText(target, newContent)
-        files.push({ path: hunk.path, action: 'M' })
+        await ctx.fs.writeText(op.target, op.newContent)
+        files.push({ path: op.rawPath, action: "M" })
       }
     }
   }
   return files
+}
+
+/** codex tools/mod.rs format_exec_output_for_model: wall time rounded to 1 decimal. */
+function formatWallTime(seconds) {
+  const rounded = Math.round(seconds * 10) / 10
+  return String(rounded)
 }
 
 export function apply(ctx) {
@@ -335,37 +434,37 @@ export function apply(ctx) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            summary: { type: 'string', required: true },
-            wall_time_seconds: { type: 'number', required: true },
+            summary: { type: "string", required: true },
+            wall_time_seconds: { type: "number", required: true },
             files: {
-              type: 'array',
+              type: "array",
               required: true,
               items: {
-                type: 'object',
+                type: "object",
                 additionalProperties: false,
                 properties: {
-                  path: { type: 'string', required: true },
-                  action: { type: 'string', required: true },
+                  path: { type: "string", required: true },
+                  action: { type: "string", required: true },
                 },
               },
             },
           },
         },
         // codex HEAD shape: the apply_patch CLI result is wrapped in the exec
-        // output shell (Exit code / Wall time / Output:) and the summary is
+        // output shell (format_exec_output_for_model: "Exit code: 0" /
+        // "Wall time: {1-decimal} seconds" / "Output:") and the summary is
         // print_summary() (apply-patch/src/lib.rs:764-780):
-        // "Success. Updated the following files:" + A/M/D lines with the
-        // patch's own path spellings.
+        // "Success. Updated the following files:" + A/M/D lines.
         render: (_args, value) => [
           {
-            type: 'text',
+            type: "text",
             text: [
               'Exit code: 0',
-              `Wall time: ${value.wall_time_seconds.toFixed(4)} seconds`,
+              `Wall time: ${formatWallTime(value.wall_time_seconds)} seconds`,
               'Output:',
               value.summary,
-              ...value.files.map((f) => `${f.action} ${f.path}`),
-            ].join('\n'),
+              ...value.files.map((file) => `${file.action} ${file.path}`),
+            ].join('\n') + '\n',
           },
         ],
       },
@@ -373,27 +472,34 @@ export function apply(ctx) {
         if (typeof args.patch !== 'string' || args.patch.trim().length === 0) {
           throw new Error('apply_patch: patch must be a non-empty string')
         }
-        let hunks
-        try {
-          hunks = parsePatch(args.patch)
-        } catch (error) {
-          throw new Error(`apply_patch verification failed: ${error.message}`)
-        }
-        if (hunks.length === 0) throw new Error('apply_patch: No files were modified.')
         const agent = exec.agent
         if (agent === undefined) throw new Error('apply_patch requires an owning agent session')
         const cwd = agent.session?.header?.cwd
         if (typeof cwd !== 'string' || cwd.length === 0) {
           throw new Error('apply_patch: no working directory on the owning agent session')
         }
-        const start = Date.now()
-        let files
+        let parsed
         try {
-          files = await applyHunks(ctx, hunks, cwd)
+          parsed = parsePatch(args.patch)
         } catch (error) {
-          // codex wraps every apply_patch failure (parse AND verification) in
-          // "apply_patch verification failed: …" (apply_patch_cli.rs asserts
-          // the prefix on missing-context / missing-file / delete-missing).
+          throw new Error(`apply_patch verification failed: ${error.message}`)
+        }
+        // Safety assessment (safety.rs): an empty patch is rejected WITHOUT
+        // the verification prefix.
+        if (parsed.hunks.length === 0) {
+          throw new Error('patch rejected: empty patch')
+        }
+        const start = Date.now()
+        // Verification stage first: any failure leaves the filesystem untouched.
+        let ops, files
+        try {
+          ops = await verifyHunks(ctx, parsed.hunks, cwd)
+        } catch (error) {
+          throw new Error(`apply_patch verification failed: ${error.message}`)
+        }
+        try {
+          files = await applyOps(ctx, ops, cwd)
+        } catch (error) {
           throw new Error(`apply_patch verification failed: ${error.message}`)
         }
         // print_summary groups by action: added → modified → deleted

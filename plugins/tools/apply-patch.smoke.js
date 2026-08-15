@@ -126,7 +126,7 @@ const text = tool.output.render({ patch }, value)[0].text
 // codex HEAD shape: exec output shell + print_summary (apply-patch/src/lib.rs:764-780).
 assert.equal(
   text,
-  'Exit code: 0\nWall time: ' + value.wall_time_seconds.toFixed(4) + ' seconds\nOutput:\nSuccess. Updated the following files:\nA new.txt\nM existing.txt\nD gone.txt',
+  'Exit code: 0\nWall time: ' + String(Math.round(value.wall_time_seconds * 10) / 10) + ' seconds\nOutput:\nSuccess. Updated the following files:\nA new.txt\nM existing.txt\nD gone.txt\n',
   'render text'
 )
 const present = tool.presentCall({ patch })
@@ -206,7 +206,7 @@ await assert.rejects(
 files.set('C:/tmp/existing.txt', 'some content\n')
 await assert.rejects(
   () => run({ patch: '*** Begin Patch\n*** Update File: existing.txt\n@@ missing\n-old\n+new\n*** End Patch' }),
-  /Failed to find context 'missing' in existing.txt/,
+  /Failed to find context 'missing' in C:\/tmp\/existing.txt/,
   'missing context errors'
 )
 
@@ -226,7 +226,7 @@ await assert.rejects(
 // ── empty patch (no hunks) ─────────────────────────────────────────────────
 await assert.rejects(
   () => run({ patch: '*** Begin Patch\n*** End Patch' }),
-  /No files were modified\./,
+  /patch rejected: empty patch/,
   'empty patch errors'
 )
 

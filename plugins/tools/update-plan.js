@@ -29,23 +29,12 @@ const planProjectionSchema = z.union([
   z.null(),
 ])
 
-/** Canonicalise and validate the model-supplied plan items. */
+/** Canonicalise the model-supplied plan items. Schema validation already
+ * enforces codex's only constraints (step is a string, status in the enum,
+ * unknown fields rejected); empty plans, empty steps, and multiple in_progress
+ * steps are all accepted exactly as codex accepts them. */
 function toPlanList(raw) {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error('invalid plan: `plan` must be a non-empty array of { step, status }')
-  }
-  const plan = []
-  let inProgress = 0
-  for (const item of raw) {
-    const step = typeof item.step === 'string' ? item.step.trim() : ''
-    if (step.length === 0) throw new Error('invalid plan: `step` must be a non-empty string')
-    if (item.status === 'in_progress') inProgress++
-    plan.push({ step, status: item.status })
-  }
-  if (inProgress > 1) {
-    throw new Error(`invalid plan: at most one step may be in_progress (got ${inProgress})`)
-  }
-  return plan
+  return raw.map((item) => ({ step: item.step, status: item.status }))
 }
 
 export function apply(ctx) {
@@ -124,10 +113,10 @@ export function apply(ctx) {
             },
           },
         },
-        render: (_args, value) => [
+        render: () => [
           {
             type: 'text',
-            text: `Updated plan: ${value.counts.pending} pending, ${value.counts.in_progress} in progress, ${value.counts.completed} completed.`,
+            text: 'Plan updated',
           },
         ],
       },

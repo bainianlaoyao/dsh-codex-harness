@@ -78,7 +78,7 @@ assert.equal(isSafeCommand(['pwsh', 'Get-Content', 'f'], { platform: 'win32' }),
 
 // ── canonicalization ───────────────────────────────────────────────────────
 assert.deepEqual(canonicalize(['bash', '-lc', 'git status']), ['git', 'status'])
-assert.deepEqual(canonicalize(['bash', '-lc', 'a; b; c']), ['__codex_shell_script__', 'bash', 'a; b; c'])
+assert.deepEqual(canonicalize(['bash', '-lc', 'a; b; c']), ['__codex_shell_script__', '-lc', 'a; b; c'])
 assert.deepEqual(canonicalize(['ls', '-la']), ['ls', '-la'])
 
 // ── classification matrix ──────────────────────────────────────────────────

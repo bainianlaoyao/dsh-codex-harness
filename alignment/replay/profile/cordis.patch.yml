@@ -1,0 +1,81 @@
+# headless-codex: one-shot replay profile for the dsh-codex-mode trajectory
+# harness (alignment/replay). Loads dsh-base + dsh-headless, adds the codex
+# preset roster, routes the model through the local trajectory mock server
+# (llm-responses wire), and swaps the stock headless runner for the
+# replay-runner (plugins/harness/replay-runner.js) which mounts the codex
+# preset and dumps the canonical conversation context to REPLAY_OUT.
+#
+# All rows reference `../../plugins/...`, which resolves through the
+# $DSH_HOME/plugins junction to the dsh-codex-mode repo (install.ps1).
+#
+# Patch mechanics: id-targeted overrides of existing bundle rows sit at the
+# top level; brand-new rows go under `- insert:`.
+
+# The stock first-prompt LLM title provider would consume an extra mock-model
+# request; the deterministic fallback title is enough for replay.
+- id: session-title-llm
+  disabled: true
+
+# Route the default model at the trajectory mock server.
+- id: agent-default-model
+  config:
+    provider: openai-responses
+    model: gpt-5-codex
+
+# git-bash-only terminal (mirrors the web profile).
+- id: bash-sandbox
+  disabled: false
+
+- id: pwsh-sandbox
+  disabled: true
+
+# tool-bash stays ENABLED globally (as in the web profile) so that
+# tool-codex-restrict's deny ['bash'] resolves; codex sessions never see the
+# bash tool because the preset denies it.
+- id: tool-bash
+  disabled: false
+
+- id: tool-pwsh
+  disabled: true
+
+# Full-access sandbox + never approval: deterministic replay, no prompts.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+    workspaceRoot: !!js process.env.REPLAY_WS ?? process.cwd()
+
+- id: approval
+  config:
+    policy: never
+
+# The stock one-shot runner cannot be renamed by id-patch (the loader
+# rejects name mismatches), so disable it and insert the replay runner under
+# its own id.
+- id: headless-runner
+  disabled: true
+
+- insert:
+    - id: replay-runner
+      name: '../../plugins/harness/replay-runner.js?v=1'
+      inject: [headlessStartup]
+      config:
+        task: !!js ctx.headlessStartup.task
+        preset: !!js process.env.REPLAY_PRESET ?? 'replay-codex'
+        outFile: !!js process.env.REPLAY_OUT
+
+- insert:
+    # Preset roster: user root ($DSH_HOME/.agent-presets -> repo
+    # agent-presets/codex). Shipped root is only assembled by the web app, so
+    # system presets are unavailable here — the codex preset is user-authored
+    # and that is all the replay needs.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: replay-codex
+
+    # The OpenAI Responses route, pointed at the mock server.
+    - id: llm-responses
+      name: '../../plugins/llm-responses.js?v=1'
+      config:
+        apiKeyEnv: OPENAI_API_KEY
+        baseURL: !!js process.env.REPLAY_MOCK_BASE_URL ?? 'http://127.0.0.1:18923/v1'

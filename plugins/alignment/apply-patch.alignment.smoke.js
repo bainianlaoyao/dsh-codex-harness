@@ -19,7 +19,15 @@ function makeFs(seed) {
   const files = new Map()
   const dirs = new Set(['C:/tmp'])
   for (const [path, content] of Object.entries(seed)) {
-    if (content !== null) files.set(`C:/tmp/${path}`, content)
+    if (content !== null) {
+      files.set(`C:/tmp/${path}`, content)
+      const segments = path.replace(/\\/g, '/').split('/')
+      let acc = 'C:/tmp'
+      for (let i = 0; i < segments.length - 1; i++) {
+        acc += '/' + segments[i]
+        dirs.add(acc)
+      }
+    }
   }
   const norm = (base, p) => {
     const isAbs = /^[A-Za-z]:/.test(p) || p.startsWith('/')
@@ -46,9 +54,14 @@ function makeFs(seed) {
       return undefined
     },
     async readText(target) {
+      if (dirs.has(target.targetKey)) {
+        const error = new Error(`cannot read a directory: ${target.displayPath}`)
+        error.code = 'EISDIR'
+        throw error
+      }
       if (!files.has(target.targetKey)) {
         const error = new Error(`file not found: ${target.displayPath}`)
-        error.code = 'FS_NOT_FOUND'
+        error.code = 'ENOENT'
         throw error
       }
       return files.get(target.targetKey)
@@ -156,7 +169,11 @@ for (const c of fixture.cases) {
     if (expect.files) {
       const after = currentFs.snapshot()
       for (const [path, content] of Object.entries(expect.files)) {
-        if (after[path] !== content) report(`expected ${path} untouched (${JSON.stringify(content)}), got ${JSON.stringify(after[path])}`)
+        if (content === null) {
+          if (after[path] !== undefined) report(`expected ${path} to remain absent, but it exists: ${JSON.stringify(after[path])}`)
+        } else if (after[path] !== content) {
+          report(`expected ${path} untouched (${JSON.stringify(content)}), got ${JSON.stringify(after[path])}`)
+        }
       }
     }
   }

@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { apply, Config, CodexCompactionEngine, name } from './codex-compactor.js'
-import { SUMMARIZATION_PROMPT, SUMMARY_PREFIX, TRUNCATION_NOTICE, approxTokens, selectUserMessages } from './compact.js'
+import { SUMMARIZATION_PROMPT, SUMMARY_PREFIX, approxTokens, selectUserMessages, truncateMiddle } from './compact.js'
 
 // ── mock seams ─────────────────────────────────────────────────────────────
 
@@ -353,7 +353,7 @@ assert.equal(CodexCompactionEngine.name, 'CodexCompactionEngine')
   const replEvent = session.events.find((event) => event.type === 'user/message' && event.surfaceOp?.op === 'replace')
   const contentTexts = replEvent.data.content.map((block) => block.text)
   assert.equal(contentTexts[0], expected.retained[0].text, 'replacement carries the truncated oldest retained message')
-  assert.ok(contentTexts[0].includes(TRUNCATION_NOTICE))
+  assert.ok(/…\d+ tokens truncated…/.test(contentTexts[0]), 'official middle-truncation marker')
   assert.equal(contentTexts[1], expected.retained[1].text, 'replacement carries the newest retained message')
   assert.equal(contentTexts[2], `${SUMMARY_PREFIX}\nSUMMARY OUTPUT`, 'summary message appended last')
   assert.ok(!contentTexts.join('').includes(U0), 'dropped oldest message absent from the replacement')

@@ -14,41 +14,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'tool-codex-request-user-input'
 export const inject = ['tools', 'userQuestions']
 
-const MAX_QUESTIONS = 3
-const MAX_HEADER_CHARS = 12
-const SNAKE_CASE = /^[a-z][a-z0-9_]*$/
-
-/** Validate the model-supplied questions against codex's 1–3 constraints. */
+/** Validate the model-supplied questions. Codex's only constraint is that
+ * every question carries non-empty options; the schema enforces the rest. */
 function validateQuestions(questions) {
-  if (!Array.isArray(questions) || questions.length === 0) {
-    throw new Error('request_user_input: `questions` must contain 1-3 questions')
-  }
-  if (questions.length > MAX_QUESTIONS) {
-    throw new Error(`request_user_input: at most ${MAX_QUESTIONS} questions (got ${questions.length})`)
-  }
   for (const question of questions) {
-    if (typeof question.id !== 'string' || !SNAKE_CASE.test(question.id)) {
-      throw new Error(
-        `request_user_input: question id must be a snake_case string (got ${JSON.stringify(question.id)})`
-      )
-    }
-    if (typeof question.question !== 'string' || question.question.trim().length === 0) {
-      throw new Error(`request_user_input: question ${question.id} must have a non-empty prompt`)
-    }
-    if (question.header !== undefined && question.header.length > MAX_HEADER_CHARS) {
-      throw new Error(
-        `request_user_input: question ${question.id} header must be ${MAX_HEADER_CHARS} or fewer chars`
-      )
-    }
-    if (question.options !== undefined) {
-      if (!Array.isArray(question.options) || question.options.length < 2 || question.options.length > 3) {
-        throw new Error(`request_user_input: question ${question.id} options must be 2-3 choices`)
-      }
-      for (const option of question.options) {
-        if (typeof option.label !== 'string' || option.label.trim().length === 0) {
-          throw new Error(`request_user_input: question ${question.id} options need non-empty labels`)
-        }
-      }
+    if (question.options.length === 0) {
+      throw new Error('request_user_input requires non-empty options for every question')
     }
   }
 }
@@ -75,6 +46,7 @@ export function apply(ctx) {
               },
               header: {
                 type: 'string',
+                required: true,
                 description: 'Short header label shown in the UI (12 or fewer chars).',
               },
               question: {
@@ -84,6 +56,7 @@ export function apply(ctx) {
               },
               options: {
                 type: 'array',
+                required: true,
                 description:
                   'Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with "(Recommended)". Do not include an "Other" option in this list; the client will add a free-form "Other" option automatically.',
                 items: {
@@ -109,17 +82,10 @@ export function apply(ctx) {
           additionalProperties: false,
           properties: {
             answers: {
-              type: 'array',
+              type: 'object',
               required: true,
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  id: { type: 'string', required: true },
-                  selected: { type: 'array', required: true, items: { type: 'string' } },
-                  custom: { type: 'string' },
-                },
-              },
+              additionalProperties: true,
+              description: 'Answers keyed by question id; each value is { answers: [string] }.',
             },
           },
         },
@@ -131,13 +97,22 @@ export function apply(ctx) {
           questions: args.questions.map((question) => ({
             id: question.id,
             question: question.question,
-            ...(question.header !== undefined ? { header: question.header } : {}),
-            ...(question.options !== undefined ? { options: question.options } : {}),
+            header: question.header,
+            options: question.options,
           })),
           ...(exec.agent !== undefined ? { agent: exec.agent } : {}),
           signal: exec.signal,
         })
-        return result
+        if (result == null) {
+          throw new Error('request_user_input was cancelled before receiving a response')
+        }
+        const answers = {}
+        for (const answer of result.answers ?? []) {
+          const list = [...(Array.isArray(answer.selected) ? answer.selected : [])]
+          if (typeof answer.custom === 'string' && answer.custom.length > 0) list.push(answer.custom)
+          answers[answer.id] = { answers: list }
+        }
+        return { answers }
       },
       presentCall: (args) => ({ card: 'generic', title: 'Request user input', kind: 'other', rawInput: args.questions }),
     })

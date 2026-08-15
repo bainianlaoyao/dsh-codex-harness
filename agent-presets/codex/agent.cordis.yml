@@ -409,17 +409,19 @@
   config:
     provider: spawn
 
-# ── web ─────────────────────────────────────────────────────────────────────
+# ── web ─────────────────────────────────────────────────────────────────
 
-# codex has no `web_fetch`. Its `web_search` is a hosted (server-side) tool that
-# cannot be replicated; the DSH `web_search` tool over the host `web` service
-# (searchProvider `anysearch` in this profile) substitutes it. Schema differs
+# codex has no web_fetch; its web_search is a hosted (server-side) tool that
+# cannot be replicated; the DSH web_search tool over the host web service
+# (searchProvider anysearch in this profile) substitutes it. Schema differs
 # from codex's hosted web_search — DSH exposes query/sources; the model's
 # search surface is DSH-shaped (documented difference, requirements §6.1).
-- id: tool-web
-  name: '@deepseek-ai/dsh-tool-web'
-  config:
-    fetch: false
+#
+# NOTE: no tool-web row is declared HERE — the host composition already mounts
+# @deepseek-ai/dsh-tool-web (fetch: false). A second row in the preset scope
+# would collide with tool-codex-prompt-align's tool:web_search / tool:web_fetch
+# shadow sections (duplicate prompt-section registration in one scope layer),
+# breaking the preset mount.
 
 # ── compaction ──────────────────────────────────────────────────────────────
 # codex compaction engine (M2): 90%-of-window trigger, newest-user-message

@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-08-15T17:52:36.043Z",
+  "trajectories": [
+    {
+      "id": "T1-basic-echo",
+      "task": "Echo the exact text: hello world",
+      "codex": {
+        "exitCode": 0,
+        "contextLines": 5
+      },
+      "dsh": {
+        "exitCode": 0,
+        "contextLines": 9
+      },
+      "comparison": {
+        "codexTotal": 5,
+        "dshTotal": 5,
+        "matched": 5,
+        "diffs": 0,
+        "injectedDsh": 4,
+        "diffRoles": {}
+      },
+      "diffs": []
+    }
+  ]
+}

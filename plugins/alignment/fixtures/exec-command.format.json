@@ -2,41 +2,103 @@
   "meta": {
     "kind": "exec_command result text format",
     "source": "codex HEAD 5bc8da6d78",
-    "module": "codex-rs/core/src/tools/context.rs",
-    "function": "ExecCommandToolOutput::response_text() (lines 442-468) + truncated_output() (412-440)",
-    "extracted": "2026-08-15",
-    "note": "Expected texts are constructed from the official response_text() section order (Wall time → Process exited with code → Process running with session ID → Original token count → Output: → body, joined by \\n) and the official truncation prefix (context_tests.rs:505 asserts 'Warning: truncated output (original token count: 42000)'). DSH counterpart: renderExecResult(value) in tools/exec-command.js. wall_time_seconds renders with 4 decimals (.4). exit_code null (signal death) renders no exit-code section (Option<exit_code>)."
+    "module": "codex-rs/core/src/tools/context.rs + unified_exec",
+    "function": "ExecCommandToolOutput::response_text() (442-468) + truncated_output() (412-440) + head_tail_buffer + utils/string/truncate.rs",
+    "extracted": "2026-08-15 (re-extracted after SEM-S4/S16/O1-O4 alignment)",
+    "note": "Section order: Chunk ID (always, 6 hex chars) → Wall time (4 decimals) → Process exited with code (only when exit_code is Some) → Process running with session ID → Original token count (always, Option in the wire but always Some in the real path) → Output: → body. Truncation: token-budget middle truncation with \"…N tokens truncated…\" plus \"Warning: truncated output (original token count: N)\\nTotal output lines: L\\n\\n\" prefix; the 1 MiB collection cap inserts \"... N bytes omitted ...\". DSH counterpart: renderExecResult(value)."
   },
   "cases": [
     {
       "name": "completed",
-      "value": { "exit_code": 0, "wall_time_seconds": 0.09, "output": "hello", "truncated": false, "original_token_count": 2 },
-      "expect": "Wall time: 0.0900 seconds\nProcess exited with code 0\nOutput:\nhello"
+      "value": {
+        "chunk_id": "a1b2c3",
+        "exit_code": 0,
+        "wall_time_seconds": 0.09,
+        "output": "hello",
+        "truncated": false,
+        "original_token_count": 2,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: a1b2c3\nWall time: 0.0900 seconds\nProcess exited with code 0\nOriginal token count: 2\nOutput:\nhello"
     },
     {
       "name": "completed-nonzero",
-      "value": { "exit_code": 2, "wall_time_seconds": 1.25, "output": "boom", "truncated": false, "original_token_count": 2 },
-      "expect": "Wall time: 1.2500 seconds\nProcess exited with code 2\nOutput:\nboom"
+      "value": {
+        "chunk_id": "deadbe",
+        "exit_code": 2,
+        "wall_time_seconds": 1.25,
+        "output": "boom",
+        "truncated": false,
+        "original_token_count": 2,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: deadbe\nWall time: 1.2500 seconds\nProcess exited with code 2\nOriginal token count: 2\nOutput:\nboom"
     },
     {
       "name": "running",
-      "value": { "session_id": 1, "wall_time_seconds": 0.09, "output": "partial", "truncated": false, "original_token_count": 2 },
-      "expect": "Wall time: 0.0900 seconds\nProcess running with session ID 1\nOutput:\npartial"
+      "value": {
+        "chunk_id": "123456",
+        "session_id": 1,
+        "wall_time_seconds": 0.09,
+        "output": "partial",
+        "truncated": false,
+        "original_token_count": 2,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: 123456\nWall time: 0.0900 seconds\nProcess running with session ID 1\nOriginal token count: 2\nOutput:\npartial"
     },
     {
       "name": "running-empty-output",
-      "value": { "session_id": 7, "wall_time_seconds": 0.09, "output": "", "truncated": false, "original_token_count": 0 },
-      "expect": "Wall time: 0.0900 seconds\nProcess running with session ID 7\nOutput:\n"
+      "value": {
+        "chunk_id": "abcdef",
+        "session_id": 7,
+        "wall_time_seconds": 0.09,
+        "output": "",
+        "truncated": false,
+        "original_token_count": 0,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: abcdef\nWall time: 0.0900 seconds\nProcess running with session ID 7\nOriginal token count: 0\nOutput:\n"
     },
     {
-      "name": "truncated",
-      "value": { "exit_code": 0, "wall_time_seconds": 1.25, "output": "1234", "truncated": true, "original_token_count": 1000 },
-      "expect": "Wall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 1000\nOutput:\nWarning: truncated output (original token count: 1000)\n1234"
+      "name": "truncated-token-budget",
+      "value": {
+        "chunk_id": "00ff00",
+        "exit_code": 0,
+        "wall_time_seconds": 1.25,
+        "output": "abcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\n",
+        "truncated": true,
+        "original_token_count": 55,
+        "model_output_max_tokens": 25
+      },
+      "expect": "Chunk ID: 00ff00\nWall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 55\nOutput:\nWarning: truncated output (original token count: 55)\nTotal output lines: 20\n\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdef…30 tokens truncated…fghij\nabcdefghij\nabcdefghij\nabcdefghij\nabcdefghij\n"
+    },
+    {
+      "name": "truncated-bytes-omitted",
+      "value": {
+        "chunk_id": "f0f0f0",
+        "exit_code": 0,
+        "wall_time_seconds": 0.5,
+        "output": "abcdefghij\nabcdefghij\nabcdefghij\n... 10 bytes omitted ...\nklmnopqrst\nklmnopqrst\nklmnopqrst\n",
+        "truncated": false,
+        "original_token_count": 18,
+        "output_omitted_bytes": 10,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: f0f0f0\nWall time: 0.5000 seconds\nProcess exited with code 0\nOriginal token count: 18\nOutput:\nabcdefghij\nabcdefghij\nabcdefghij\n... 10 bytes omitted ...\nklmnopqrst\nklmnopqrst\nklmnopqrst\n"
     },
     {
       "name": "signal-death-no-exit-code-section",
-      "value": { "exit_code": null, "wall_time_seconds": 0.5, "output": "killed", "truncated": false, "original_token_count": 2 },
-      "expect": "Wall time: 0.5000 seconds\nOutput:\nkilled"
+      "value": {
+        "chunk_id": "c0ffee",
+        "exit_code": null,
+        "wall_time_seconds": 0.5,
+        "output": "killed",
+        "truncated": false,
+        "original_token_count": 2,
+        "model_output_max_tokens": 10000
+      },
+      "expect": "Chunk ID: c0ffee\nWall time: 0.5000 seconds\nOriginal token count: 2\nOutput:\nkilled"
     }
   ]
 }

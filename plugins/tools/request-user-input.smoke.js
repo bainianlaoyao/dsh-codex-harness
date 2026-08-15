@@ -1,8 +1,8 @@
 /**
  * M1 smoke test for dsh-codex/tools/request-user-input.js — mock
  * `ctx.userQuestions.ask` capturing the mapped request and returning a canned
- * answer, verifying validation (1-3 questions), the DSH ask() mapping, and the
- * JSON render.
+ * answer, verifying the codex response shape, the required question fields, the
+ * non-empty-options validation, and the cancelled seam.
  *
  * Usage: node dsh-codex/tools/request-user-input.smoke.js  (from the profile root)
  */
@@ -10,14 +10,14 @@ import assert from 'node:assert/strict'
 
 const captured = []
 let lastAsk = null
-const mockAnswer = { answers: [{ id: 'mode', selected: ['Fast (Recommended)'], custom: '' }] }
+let canned = { answers: [{ id: 'mode', selected: ['Fast (Recommended)'], custom: '' }] }
 
 const ctx = {
   tools: { register: (definition) => captured.push(definition) },
   userQuestions: {
     async ask(request) {
       lastAsk = request
-      return mockAnswer
+      return canned
     },
   },
 }
@@ -47,7 +47,7 @@ const questions = [
   },
 ]
 
-// ── happy path: ask() mapping + answers passthrough ────────────────────────
+// ── happy path: ask() mapping + codex response shape ───────────────────────
 const exec = makeExec()
 const value = await run({ questions }, exec)
 assert.ok(lastAsk, 'ask called')
@@ -58,52 +58,53 @@ assert.deepEqual(
 )
 assert.equal(lastAsk.agent, exec.agent, 'agent forwarded')
 assert.ok(lastAsk.signal instanceof AbortSignal, 'signal forwarded')
-assert.deepEqual(value, mockAnswer, 'answers returned as-is')
+assert.deepEqual(value, { answers: { mode: { answers: ['Fast (Recommended)'] } } }, 'answers mapped to codex {answers:{id:{answers:[...]}}} shape')
 
-// ── header/options omitted stay omitted ────────────────────────────────────
-await run({ questions: [{ id: 'plain', question: 'Just yes or no?' }] })
-assert.deepEqual(lastAsk.questions, [{ id: 'plain', question: 'Just yes or no?' }], 'optional fields omitted')
+// ── custom free-form text is appended after selected ───────────────────────
+canned = { answers: [{ id: 'mode', selected: [], custom: 'Something else' }] }
+const withCustom = await run({ questions })
+assert.deepEqual(withCustom, { answers: { mode: { answers: ['Something else'] } } }, 'custom appended into answers array')
 
 // ── render ─────────────────────────────────────────────────────────────────
-const text = tool.output.render({ questions }, value)[0].text
-assert.equal(text, JSON.stringify(value), 'render is JSON.stringify of answers')
+canned = { answers: [{ id: 'mode', selected: ['Fast (Recommended)'], custom: '' }] }
+const happy = await run({ questions })
+const text = tool.output.render({ questions }, happy)[0].text
+assert.equal(text, JSON.stringify(happy), 'render is JSON.stringify of answers')
 const present = tool.presentCall({ questions })
 assert.equal(present.title, 'Request user input', 'presentCall title')
 
-// ── validation ─────────────────────────────────────────────────────────────
-const q = (id, extra = {}) => ({
-  id,
-  question: `Question ${id}?`,
-  options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }],
-  ...extra,
+// ── non-empty options is codex's only question validation ──────────────────
+await assert.rejects(
+  () => run({ questions: [{ id: 'none', header: 'H', question: 'Q?', options: [] }] }),
+  /request_user_input requires non-empty options for every question/,
+  'empty options rejected'
+)
+
+// ── no 1-3 count / snake_case / header-length / options-count limits ───────
+const opts = (n) => Array.from({ length: n }, (_, i) => ({ label: `L${i}`, description: `d${i}` }))
+await run({
+  questions: [
+    { id: 'Not-Snake!', header: 'This header is way too long', question: 'Q1?', options: opts(1) },
+    { id: 'b', header: 'B', question: 'Q2?', options: opts(2) },
+    { id: 'c', header: 'C', question: 'Q3?', options: opts(3) },
+    { id: 'd', header: 'D', question: 'Q4?', options: opts(4) },
+  ],
 })
+
+// ── cancelled seam surfaces the codex message ──────────────────────────────
+canned = null
 await assert.rejects(
-  () => run({ questions: [q('a'), q('b'), q('c'), q('d')] }),
-  /at most 3 questions \(got 4\)/,
-  'more than 3 questions rejected'
+  () => run({ questions }),
+  /request_user_input was cancelled before receiving a response/,
+  'cancelled seam surfaced'
 )
-await assert.rejects(() => run({ questions: [] }), /must contain 1-3 questions/, 'empty questions rejected')
-await assert.rejects(
-  () => run({ questions: [{ ...q('bad-id'), id: 'Not-Snake' }] }),
-  /id must be a snake_case string/,
-  'snake_case id enforced'
-)
-await assert.rejects(
-  () => run({ questions: [{ ...q('long'), header: 'This header is way too long' }] }),
-  /header must be 12 or fewer chars/,
-  'header length enforced'
-)
-await assert.rejects(
-  () => run({ questions: [{ ...q('one_opt'), options: [{ label: 'Only', description: 'one' }] }] }),
-  /options must be 2-3 choices/,
-  'options count enforced'
-)
+canned = { answers: [{ id: 'mode', selected: ['Fast (Recommended)'], custom: '' }] }
 
 // ── schema spot checks (codex-parity wording) ──────────────────────────────
 const qSchema = tool.parameters.properties.questions
 assert.ok(tool.parameters.required.includes('questions'), 'questions required')
 assert.equal(qSchema.description, 'Questions to show the user. Prefer 1 and do not exceed 3', 'codex questions description')
-assert.deepEqual(qSchema.items.required, ['id', 'question'], 'id+question required, header/options optional')
+assert.deepEqual(qSchema.items.required, ['id', 'header', 'question', 'options'], 'id+header+question+options required')
 assert.equal(
   qSchema.items.properties.options.description,
   'Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with "(Recommended)". Do not include an "Other" option in this list; the client will add a free-form "Other" option automatically.',

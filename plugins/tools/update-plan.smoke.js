@@ -63,27 +63,27 @@ assert.deepEqual(registeredProjection.view(plan), plan, 'view is identity')
 
 // ── render ─────────────────────────────────────────────────────────────────
 const text = tool.output.render({ plan }, value)[0].text
-assert.equal(text, 'Updated plan: 1 pending, 1 in progress, 1 completed.', 'render text')
+assert.equal(text, 'Plan updated', 'render text is the codex literal')
 const present = tool.presentCall({ plan })
 assert.equal(present.title, 'Update plan', 'presentCall title')
 assert.deepEqual(present.rawInput, plan, 'presentCall rawInput is the plan array')
 
-// ── validation: agent required, at most one in_progress, non-empty steps ───
+// ── validation: agent required; codex accepts empty/multiple-in_progress ──
 await assert.rejects(
   () => tool.execute({ plan }, { signal: new AbortController().signal }),
   /update_plan requires an owning agent session/,
   'agent required'
 )
-await assert.rejects(
-  () => tool.execute({ plan: [{ step: 'a', status: 'in_progress' }, { step: 'b', status: 'in_progress' }] }, makeExec()),
-  /at most one step may be in_progress/,
-  'single in_progress enforced'
+const multiInProgress = await tool.execute(
+  { plan: [{ step: 'a', status: 'in_progress' }, { step: 'b', status: 'in_progress' }] },
+  makeExec()
 )
-await assert.rejects(
-  () => tool.execute({ plan: [] }, makeExec()),
-  /must be a non-empty array/,
-  'empty plan rejected'
-)
+assert.equal(multiInProgress.counts.in_progress, 2, 'multiple in_progress accepted')
+const emptyPlan = await tool.execute({ plan: [] }, makeExec())
+assert.deepEqual(emptyPlan.plan, [], 'empty plan accepted')
+assert.deepEqual(emptyPlan.counts, { pending: 0, in_progress: 0, completed: 0 }, 'empty plan counts are zero')
+const emptyStep = await tool.execute({ plan: [{ step: '', status: 'pending' }] }, makeExec())
+assert.deepEqual(emptyStep.plan, [{ step: '', status: 'pending' }], 'empty step string accepted')
 
 // ── schema spot checks (converted to JSON Schema by defineTool) ────────────
 assert.ok(tool.parameters.required.includes('plan'), 'plan required')
