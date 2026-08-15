@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "kind": "exec_command result text format",
+    "source": "codex HEAD 5bc8da6d78",
+    "module": "codex-rs/core/src/tools/context.rs",
+    "function": "ExecCommandToolOutput::response_text() (lines 442-468) + truncated_output() (412-440)",
+    "extracted": "2026-08-15",
+    "note": "Expected texts are constructed from the official response_text() section order (Wall time → Process exited with code → Process running with session ID → Original token count → Output: → body, joined by \\n) and the official truncation prefix (context_tests.rs:505 asserts 'Warning: truncated output (original token count: 42000)'). DSH counterpart: renderExecResult(value) in tools/exec-command.js. wall_time_seconds renders with 4 decimals (.4). exit_code null (signal death) renders no exit-code section (Option<exit_code>)."
+  },
+  "cases": [
+    {
+      "name": "completed",
+      "value": { "exit_code": 0, "wall_time_seconds": 0.09, "output": "hello", "truncated": false, "original_token_count": 2 },
+      "expect": "Wall time: 0.0900 seconds\nProcess exited with code 0\nOutput:\nhello"
+    },
+    {
+      "name": "completed-nonzero",
+      "value": { "exit_code": 2, "wall_time_seconds": 1.25, "output": "boom", "truncated": false, "original_token_count": 2 },
+      "expect": "Wall time: 1.2500 seconds\nProcess exited with code 2\nOutput:\nboom"
+    },
+    {
+      "name": "running",
+      "value": { "session_id": 1, "wall_time_seconds": 0.09, "output": "partial", "truncated": false, "original_token_count": 2 },
+      "expect": "Wall time: 0.0900 seconds\nProcess running with session ID 1\nOutput:\npartial"
+    },
+    {
+      "name": "running-empty-output",
+      "value": { "session_id": 7, "wall_time_seconds": 0.09, "output": "", "truncated": false, "original_token_count": 0 },
+      "expect": "Wall time: 0.0900 seconds\nProcess running with session ID 7\nOutput:\n"
+    },
+    {
+      "name": "truncated",
+      "value": { "exit_code": 0, "wall_time_seconds": 1.25, "output": "1234", "truncated": true, "original_token_count": 1000 },
+      "expect": "Wall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 1000\nOutput:\nWarning: truncated output (original token count: 1000)\n1234"
+    },
+    {
+      "name": "signal-death-no-exit-code-section",
+      "value": { "exit_code": null, "wall_time_seconds": 0.5, "output": "killed", "truncated": false, "original_token_count": 2 },
+      "expect": "Wall time: 0.5000 seconds\nOutput:\nkilled"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "dsh-codex",
+  "private": true,
+  "type": "module",
+  "description": "dsh-codex mode plugins: OpenAI LLM adapter (M0) and codex-parity tools (M1), loaded by the dsh web profile as local plugin files."
+}

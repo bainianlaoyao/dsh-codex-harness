@@ -1,0 +1,34 @@
+# dsh-codex-mode bundle patch.
+#
+# Registers the OpenAI model routes on the HOST plane (the same two rows the
+# web profile patch used to carry by hand):
+#   - `openai-official`  — chat-completions wire (apply_patch as JSON function)
+#   - `openai-responses` — Responses API wire, codex's own protocol (apply_patch
+#     as a true freeform custom tool with codex's lark grammar)
+#
+# Install:
+#   dsh plugin --profile web add github:<owner>/dsh-codex-mode
+#   # or, for local development:
+#   dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
+#
+# The AGENT PRESET (agent-presets/codex) is NOT a bundle artifact — bundles
+# distribute composition rows only. Deploy it with scripts/install.ps1
+# (creates junctions) or copy agent-presets/codex into $DSH_HOME/.agent-presets/.
+#
+# NOTE: `name` resolves as a module specifier; when installed as a package the
+# rows below resolve `./plugins/...` relative to this bundle. Verify with
+# `dsh --profile web dump-config` after install (the working profile patch
+# already carries these two rows under `./dsh-codex/...`; remove those first to
+# avoid duplicate route registration).
+- insert:
+    - id: llm-openai
+      name: './plugins/llm-openai.js?v=1'
+      config:
+        apiKeyEnv: OPENAI_API_KEY
+        baseURL: 'https://api.openai.com/v1'
+
+    - id: llm-responses
+      name: './plugins/llm-responses.js?v=1'
+      config:
+        apiKeyEnv: OPENAI_API_KEY
+        baseURL: 'https://api.openai.com/v1'

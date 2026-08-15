@@ -1,0 +1,34 @@
+{
+  "meta": {
+    "kind": "exec-policy dangerous-command blacklist",
+    "source": "codex HEAD 5bc8da6d78",
+    "module": "codex-rs/shell-command/src/command_safety/is_dangerous_command.rs",
+    "function": "dangerous_command_match(&[String]) -> Option<DangerousCommandMatch>",
+    "extracted": "2026-08-15",
+    "note": "Cases extracted from the official unit tests (mod tests, is_dangerous_command.rs:249-340). expect true = Some(_) (dangerous), false = None. DSH counterpart: isDangerousCommand(argv, { platform }) from policy/exec-policy.js."
+  },
+  "cases": [
+    { "argv": ["rm", "-rf", "/"], "expect": true, "platform": "all", "ref": "rm_rf_is_dangerous" },
+    { "argv": ["rm", "-f", "/"], "expect": true, "platform": "all", "ref": "rm_f_is_dangerous" },
+    { "argv": ["/bin/rm", "-fr", "/tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["rm", "-r", "-f", "/tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["rm", "--force", "/tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["rm", "/tmp/example", "-f"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["sudo", "rm", "-rf", "/tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["env", "TARGET=/tmp/example", "rm", "-rf", "/tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_variants_are_dangerous" },
+    { "argv": ["bash", "-lc", "printf x | rm -rf /tmp/example"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "if test -d /tmp/example; then rm --force /tmp/example; fi"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "rm -rf \"$TARGET\" >/dev/null"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "for target in /tmp/a /tmp/b; do rm -r -f \"$target\"; done"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "echo \"$(rm -rf /tmp/example)\""], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "bash -c 'rm -rf /tmp/example'"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["bash", "-lc", "trap 'rm -rf /tmp/example' EXIT"], "expect": true, "platform": "all", "ref": "forced_rm_in_complex_shell_syntax_is_dangerous" },
+    { "argv": ["rm", "-r", "/tmp/example"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["rm", "--", "-f"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["bash", "-lc", "echo 'rm -rf /tmp/example'"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["bash", "-lc", "cmd=rm; $cmd -rf /tmp/example"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["bash", "-lc", "if then rm -rf /tmp/example"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["env", "TARGET=/tmp/example", "rm", "-r", "/tmp/example"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" },
+    { "argv": ["bash", "-lc", "trap 'echo rm -rf /tmp/example' EXIT"], "expect": false, "platform": "all", "ref": "non_forced_or_non_literal_rm_is_not_dangerous" }
+  ]
+}

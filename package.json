@@ -1,0 +1,34 @@
+{
+  "name": "dsh-codex-mode",
+  "description": "Codex-aligned agent mode for DeepSeek Harness (dsh): OpenAI model routes (chat-completions + Responses API), the codex tool surface (exec_command/write_stdin/apply_patch/update_plan/...), the codex approval & sandbox policy layer, and the `codex` agent preset with byte-aligned BASE_INSTRUCTIONS.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "plugins/llm-openai.js",
+  "exports": {
+    "./plugins/llm-openai.js": "./plugins/llm-openai.js",
+    "./plugins/llm-responses.js": "./plugins/llm-responses.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "codex",
+    "agent-preset",
+    "openai",
+    "responses-api"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/<owner>/dsh-codex-mode.git"
+  },
+  "scripts": {
+    "test": "node agent-presets/codex/check-rows.mjs && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/update-plan.smoke.js && node tools/view-image.smoke.js && node tools/request-user-input.smoke.js && node tools/multi-agent.smoke.js && node tools/restrict.smoke.js && node tools/prompt-align.smoke.js && node policy/exec-policy.smoke.js && node harness/compact.smoke.js && node harness/approvals.smoke.js && node harness/codex-compactor.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node alignment/exec-policy.alignment.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js && node alignment/tool-schema.alignment.smoke.js"
+  }
+}
