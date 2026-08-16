@@ -147,16 +147,53 @@ assert.ok(badShell instanceof Error && /unsupported shell "powershell"/.test(bad
 const goodShell = await run(execCommand, { cmd: 'echo hi', shell: 'git-bash' })
 assert.equal(goodShell.exit_code, 0, 'bash/shell/git-bash accepted and map to the git-bash backend')
 
-// justification without sandbox_permissions is rejected (handlers/mod.rs shared rule)
-const jw = await run(execCommand, { cmd: 'echo hi', justification: 'because' }).catch((error) => error)
-assert.ok(jw instanceof Error && jw.message.includes('justification') && jw.message.includes('require_escalated'), 'justification requires sandbox_permissions')
+// blank shell/workdir echoes are treated as omitted (echo-noise.js): models
+// echo the optional string fields as "" — must run, never hard-fail
+const blankEcho = await run(execCommand, { cmd: 'echo hi', shell: '', workdir: '   ' })
+assert.equal(blankEcho.exit_code, 0, 'blank shell + whitespace workdir run normally')
+assert.equal(started[started.length - 1].workdir, 'C:/work', 'blank workdir falls back to the session cwd')
 
-// blank justification is treated as omitted: models echo optional fields as
-// empty strings (e.g. justification: "" with sandbox_permissions: "use_default")
-const blankJ = await run(execCommand, { cmd: 'echo hi', justification: '', sandbox_permissions: 'use_default' })
-assert.equal(blankJ.exit_code, 0, 'blank justification with use_default runs normally')
-const blankJ2 = await run(execCommand, { cmd: 'echo hi', justification: '   ', sandbox_permissions: 'use_default' })
-assert.equal(blankJ2.exit_code, 0, 'whitespace-only justification with use_default runs normally')
+// ── justification pairing (handlers/mod.rs shared rule) — ADAPTIVE ────────
+// The codex sandbox vocabulary is meaningful only inside the live escalation
+// window (restricted host sandbox + askable approval policy); outside it the
+// fields are inert model echo noise and must never hard-fail the call
+// (2026-08-16 adaptation, extending the blank-justification exemption).
+const inertJ = await run(execCommand, { cmd: 'echo hi', justification: 'because' })
+assert.equal(inertJ.exit_code, 0, 'non-blank justification without escalation is inert under an unrestricted sandbox')
+const inertEsc = await run(execCommand, { cmd: 'echo hi', sandbox_permissions: 'require_escalated', justification: 'because' })
+assert.equal(inertEsc.exit_code, 0, 'require_escalated is inert under an unrestricted sandbox (codex Skip)')
+
+// blank justification is treated as omitted in BOTH windows: models echo
+// optional fields as empty strings (e.g. justification: "" with use_default)
+sandboxMode = 'workspace-write'
+const blankRestricted = await run(execCommand, { cmd: 'echo hi', justification: '', sandbox_permissions: 'use_default' })
+assert.equal(blankRestricted.exit_code, 0, 'blank justification + use_default runs inside the live window')
+const jw = await run(execCommand, { cmd: 'echo hi', justification: 'because' }).catch((error) => error)
+assert.ok(jw instanceof Error && jw.message.includes('justification') && jw.message.includes('require_escalated'), 'justification requires sandbox_permissions inside the live window')
+sandboxMode = 'danger-full-access'
+
+const nonBlankInert = await run(execCommand, { cmd: 'echo hi', justification: '   ', sandbox_permissions: 'use_default' })
+assert.equal(nonBlankInert.exit_code, 0, 'whitespace justification + use_default runs normally')
+
+// Regression: gpt-5.6 via the OpenAI wire echoes the full optional schema on
+// every call — justification:"" + sandbox_permissions:"use_default" +
+// prefix_rule:[] / shell / login / tty / max_output_tokens / workdir /
+// yield_time_ms (observed failing shape, 2026-08-16 session). All must run,
+// never hard-fail the call.
+const echoShape = await run(execCommand, {
+  cmd: "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!dist' -g '!build'",
+  justification: '',
+  login: false,
+  max_output_tokens: 2000,
+  prefix_rule: [],
+  sandbox_permissions: 'use_default',
+  shell: 'bash',
+  tty: false,
+  workdir: 'D:/Data/DEV/work',
+  yield_time_ms: 10000,
+})
+assert.equal(echoShape.exit_code, 0, 'model echo shape (blank justification + use_default + full optional set) runs normally')
+assert.equal(echoShape.output, 'hi\n', 'command actually executed through the shell seam')
 
 // ── yield → session id → write_stdin poll ──────────────────────────────────
 const slow = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
@@ -258,6 +295,21 @@ assert.equal(approvalLog[approvalLog.length - 1].reason, 'needs network', 'escal
 
 await run(execCommand, { cmd: 'curl http://y', sandbox_permissions: 'require_escalated', justification: '' })
 assert.equal(approvalLog[approvalLog.length - 1].reason, 'model requested escalation', 'blank escalation justification falls back to the fixed reason')
+sandboxMode = 'danger-full-access'
+
+// ── session approved prefix (codex prefix_rule) ─────────────────────────────
+// An escalation request approved together with a prefix_rule caches the prefix
+// for the session: subsequent commands starting with those tokens skip the
+// gate, non-matching commands still ask.
+sandboxMode = 'workspace-write'
+const beforePrefix = approvalLog.length
+await run(execCommand, { cmd: 'rm -rf build', sandbox_permissions: 'require_escalated', justification: 'clean build dir', prefix_rule: ['rm', '-rf', 'build'] })
+assert.equal(approvalLog.length, beforePrefix + 1, 'escalation with prefix_rule asks once')
+assert.equal(approvalLog[approvalLog.length - 1].reason, 'clean build dir', 'escalation reason reaches the UI')
+await run(execCommand, { cmd: 'rm -rf build', sandbox_permissions: 'use_default', justification: '' })
+assert.equal(approvalLog.length, beforePrefix + 1, 'matching prefix skips the gate without re-prompting')
+await run(execCommand, { cmd: 'rm -rf src', sandbox_permissions: 'use_default', justification: '' })
+assert.equal(approvalLog.length, beforePrefix + 2, 'non-matching command still asks')
 sandboxMode = 'danger-full-access'
 
 // ── schema parity spot checks (shell_spec.rs) ──────────────────────────────

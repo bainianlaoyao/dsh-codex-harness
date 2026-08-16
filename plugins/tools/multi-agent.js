@@ -8,10 +8,19 @@
  * (multi_agents_spec.rs) with unrepresentable fields documented:
  * - `agent_type` / `service_tier` / `reasoning_effort`: accepted for schema
  *   parity, ignored (DSH AgentOptions only carries provider/model/maxTokens).
+ * - `fork_context`: true selects the DSH `fork` subagent provider — the child
+ *   inherits the parent's completed-turn history, codex's fork semantics
+ *   (fallback: the configured provider when the deployment registers no
+ *   `fork`); false/omitted uses the configured provider (default `spawn`,
+ *   a fresh history-less child).
  * - `resume_agent`: DSH has no pause/resume; a followup with a neutral
  *   continue message starts the next turn on the same conversation.
  * - `items`: validated by codex's message-vs-items rules and mapped onto the
  *   DSH text-only prompt (non-text items render as `[type] <reference>` text).
+ *   Model echo noise is normalized BEFORE the codex union (same adaptation as
+ *   exec_command's blank-justification exemption): an items array of all-empty
+ *   stub objects next to a real message is dropped, and a blank message next
+ *   to meaningful items is dropped; genuinely providing both still errors.
  * - agent statuses are the DSH registry vocabulary (running/idle/…), not the
  *   codex AgentStatus enum; status output shapes match codex's field names.
  *
@@ -21,6 +30,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
+import { isBlankText, stripStubEntries } from './echo-noise.js?v=2'
 
 export const name = 'tool-codex-multi-agent'
 export const inject = ['tools', 'subagents']
@@ -64,18 +74,45 @@ function parseAgentIdTargets(targets) {
   return targets.map(parseAgentIdTarget)
 }
 
+/** Content-bearing fields of a collab item (codex create_collab_input_items_schema). */
+const COLLAB_ITEM_FIELDS = ['type', 'text', 'image_url', 'audio_url', 'path', 'name']
+
+/**
+ * Normalize model echo noise before the codex message-vs-items union — the
+ * same adaptation as exec_command's blank-justification exemption: models
+ * routinely echo a tool's full optional schema, so `items` filled with
+ * all-empty stub objects next to a real `message` (and a blank `message`
+ * next to real items) must not hard-fail the call.
+ * - an items array with ≥1 entry but NO meaningful entry is treated as
+ *   absent (echo stub); a deliberate `[]` keeps the codex "Items can't be
+ *   empty" error;
+ * - a blank/whitespace message next to meaningful items is dropped so the
+ *   items win (reverse echo shape); a blank message as the ONLY input keeps
+ *   the codex "Empty message can't be sent to an agent" error.
+ * Genuinely providing both non-empty inputs still fails with the codex error.
+ */
+function normalizeCollabInput(message, items) {
+  const meaningfulItems = stripStubEntries(items, COLLAB_ITEM_FIELDS)
+  const hasMeaningfulItems = Array.isArray(meaningfulItems) && meaningfulItems.length > 0
+  return {
+    message: isBlankText(message) && hasMeaningfulItems ? undefined : message,
+    items: meaningfulItems,
+  }
+}
+
 /** Validate codex's message-vs-items union and return the canonical input items. */
 function parseCollabInput(message, items) {
-  const hasMessage = message !== undefined
-  const hasItems = items !== undefined
+  const { message: m, items: it } = normalizeCollabInput(message, items)
+  const hasMessage = m !== undefined
+  const hasItems = it !== undefined
   if (hasMessage && hasItems) throw new Error('Provide either message or items, but not both')
   if (!hasMessage && !hasItems) throw new Error('Provide one of: message or items')
   if (hasMessage) {
-    if (message.trim().length === 0) throw new Error("Empty message can't be sent to an agent")
-    return [{ type: 'text', text: message }]
+    if (m.trim().length === 0) throw new Error("Empty message can't be sent to an agent")
+    return [{ type: 'text', text: m }]
   }
-  if (items.length === 0) throw new Error("Items can't be empty")
-  return items
+  if (it.length === 0) throw new Error("Items can't be empty")
+  return it
 }
 
 /** Map codex collab input items onto the DSH text-only subagent prompt. */
@@ -133,6 +170,14 @@ function registerMultiAgentTools(ctx, config) {
         const parent = exec.agent
         if (parent === undefined) throw new Error('spawn_agent requires a calling agent')
         const prompt = inputItemsToPrompt(parseCollabInput(args.message, args.items))
+        // codex fork semantics: fork_context=true seeds the child with the
+        // parent's completed-turn history, which the DSH `fork` provider
+        // supplies; fall back to the configured provider (spawn) when the
+        // deployment registers none.
+        const provider =
+          args.fork_context === true && ctx.subagents.getProvider?.('fork') !== undefined
+            ? 'fork'
+            : config.provider
         const started = await ctx.subagents.startContinuable({
           provider,
           label: 'codex spawn_agent',

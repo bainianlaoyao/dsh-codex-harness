@@ -11,9 +11,12 @@ import assert from 'node:assert/strict'
 
 const sections = []
 const contexts = []
+let sandboxMode = 'danger-full-access'
+let approvalPolicy = 'ask'
 const ctx = {
   get(service) {
-    if (service === 'fs') return { sandboxMode: 'danger-full-access' }
+    if (service === 'fs') return { sandboxMode }
+    if (service === 'approval') return { config: { policy: approvalPolicy }, overrideOf: () => undefined }
     return undefined
   },
   systemPrompt: {
@@ -26,7 +29,7 @@ const ctx = {
   },
 }
 
-const { apply, renderCurrentTime, renderEnvironment, isoUtcSeconds } = await import('./prompt-align.js')
+const { apply, renderCurrentTime, renderEnvironment, renderEscalationStatus, isoUtcSeconds } = await import('./prompt-align.js')
 
 apply(ctx, {})
 
@@ -36,11 +39,17 @@ assert.deepEqual(names, ['app:web-surface', 'tool:bash', 'tool:web_fetch', 'tool
 for (const s of sections) assert.equal(s.text, '', `shadowed section ${s.name} carries empty text`)
 
 // ── codex world-state fragments registered ─────────────────────────────────
-assert.deepEqual(contexts.map((c) => c.name).sort(), ['codex:current-time', 'codex:environment'], 'both codex fragments registered')
+assert.deepEqual(
+  contexts.map((c) => c.name).sort(),
+  ['codex:current-time', 'codex:environment', 'codex:sandbox-escalation'],
+  'all three codex fragments registered'
+)
 const env = contexts.find((c) => c.name === 'codex:environment')
 const time = contexts.find((c) => c.name === 'codex:current-time')
+const escalation = contexts.find((c) => c.name === 'codex:sandbox-escalation')
 assert.ok(env.order > 115, `environment after permissions sentences (order ${env.order})`)
 assert.ok(time.order > env.order, 'current-time after environment')
+assert.ok(escalation.order < env.order, 'sandbox-escalation before environment (after approval:policy=115)')
 
 // ── environment fragment shape (danger-full-access → unrestricted) ─────────
 const agent = { session: { header: { cwd: 'D:\\Data\\DEV\\dsh' } } }
@@ -64,5 +73,19 @@ assert.equal(renderCurrentTime(fixed), '<current_time_reminder>It is 2026-08-15 
 
 // ── XML escaping ───────────────────────────────────────────────────────────
 assert.ok(renderEnvironment({ agent: { session: { header: { cwd: 'a&b<c>' } } } }, ctx.get('fs')).includes('  <cwd>a&amp;b&lt;c&gt;</cwd>'), 'cwd XML-escaped')
+
+// ── per-session escalation status (2026-08-16 adaptation) ──────────────────
+const escCtx = { agent }
+const inertFullAccess = renderEscalationStatus(escCtx, ctx.get('approval'), ctx.get('fs'))
+assert.ok(inertFullAccess.includes('INERT') && inertFullAccess.includes('Do not set `sandbox_permissions`'), 'full access + ask → escalation INERT')
+approvalPolicy = 'never'
+sandboxMode = 'workspace-write'
+const inertNever = renderEscalationStatus(escCtx, ctx.get('approval'), ctx.get('fs'))
+assert.ok(inertNever.includes('INERT'), 'restricted + never → escalation INERT (no prompts at all)')
+approvalPolicy = 'ask'
+const live = renderEscalationStatus(escCtx, ctx.get('approval'), ctx.get('fs'))
+assert.ok(live.includes('LIVE') && live.includes('mode: workspace-write') && live.includes('require_escalated'), 'restricted + ask → escalation LIVE')
+approvalPolicy = 'ask'
+sandboxMode = 'danger-full-access'
 
 console.log('prompt-align smoke test: ALL PASS')

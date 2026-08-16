@@ -345,7 +345,7 @@
 # <current_time_reminder>) as runtime-context snapshot sections. Consumer-only
 # row: the systemPrompt registry lives in the host plane, so it sits loose.
 - id: tool-codex-prompt-align
-  name: '../../plugins/tools/prompt-align.js?v=1'
+  name: '../../plugins/tools/prompt-align.js?v=2'
 
 # ── codex tool set (M1 / D1) ────────────────────────────────────────────────
 
@@ -371,7 +371,7 @@
         timeoutMs: 300000
 
     - id: tool-codex-exec
-      name: '../../plugins/tools/exec-command.js?v=4'
+      name: '../../plugins/tools/exec-command.js?v=7'
       config:
         # D1: exec backend is git bash (dsh-terminal-bash registers the `shell` type).
         # The model-facing `shell` parameter is validated (bash/shell/git-bash)
@@ -405,7 +405,7 @@
 # `subagents` registry and its spawn/fork backends live in the HOST
 # composition, so this consumer-only row sits loose.
 - id: tool-codex-multi-agent
-  name: '../../plugins/tools/multi-agent.js?v=1'
+  name: '../../plugins/tools/multi-agent.js?v=3'
   config:
     provider: spawn
 

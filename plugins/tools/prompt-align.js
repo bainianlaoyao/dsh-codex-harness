@@ -37,6 +37,15 @@
  *        (reminder_interval_seconds=1); the snapshot diff reinjects whenever
  *        the text changes, so the second-level timestamp gives the same
  *        per-turn freshness.
+ *      - codex:sandbox-escalation — the per-session escalation status of the
+ *        exec_command sandbox vocabulary (2026-08-16 dsh adaptation). codex's
+ *        sandbox is an OS isolation layer dsh does not replicate, so the
+ *        model-facing sandbox_permissions/justification/prefix_rule fields are
+ *        meaningful only under a restricted host sandbox with an askable
+ *        approval policy. The section tells the model whether the fields are
+ *        LIVE (use require_escalated + justification) or INERT (omit them) —
+ *        the model-side half of the adaptation, mirroring how DSH's own
+ *        approval `never` mode instructs models not to request escalation.
  *
  * @module dsh-codex/tools/prompt-align
  */
@@ -103,6 +112,30 @@ export function renderCurrentTime(date = new Date()) {
   return `<current_time_reminder>It is ${isoUtcSeconds(date)}.</current_time_reminder>`
 }
 
+/**
+ * Per-session exec_command escalation status (2026-08-16 dsh adaptation).
+ * codex's sandbox concept is an OS isolation layer dsh does not replicate;
+ * the escalation vocabulary is therefore LIVE only when the DSH host sandbox
+ * is restricted AND the approval policy can prompt. Everywhere else the fields
+ * are inert — the model is told to omit them, mirroring how DSH's approval
+ * `never` mode already instructs models not to request sandbox escalation.
+ */
+export function renderEscalationStatus(context, approval, fs) {
+  const sandboxMode = fs?.sandboxMode
+  const sessionPolicy = approval?.overrideOf?.(context?.agent?.session) ?? approval?.config?.policy
+  const restricted = sandboxMode !== undefined && sandboxMode !== 'danger-full-access'
+  if (!restricted || sessionPolicy === 'never') {
+    return (
+      'Codex sandbox escalation is INERT in this session: exec_command runs with full access and approvals are disabled. ' +
+      'Do not set `sandbox_permissions` or `justification` on exec_command; omit them (or use `sandbox_permissions: "use_default"`).'
+    )
+  }
+  return (
+    `Codex sandbox escalation is LIVE: exec_command runs under a restricted sandbox (mode: ${sandboxMode}). ` +
+    'To run a command needing wider access, set `sandbox_permissions: "require_escalated"` with a `justification`; the user will be asked to approve the escalation.'
+  )
+}
+
 export function apply(ctx, _config) {
   // ── shadow DSH platform sections to empty (dropped at render) ────────────
   ctx.systemPrompt.section({ name: 'app:web-surface', order: -98, text: '' })
@@ -114,6 +147,11 @@ export function apply(ctx, _config) {
   // ── codex world-state fragments (runtime-context snapshot) ────────────────
   // Orders sit after the permissions sentences (sandbox:policy=110,
   // approval:policy=115) to match codex's permissions → environments order.
+  ctx.systemPrompt.context({
+    name: 'codex:sandbox-escalation',
+    order: 116,
+    text: (context) => renderEscalationStatus(context, ctx.get('approval'), ctx.get('fs')),
+  })
   ctx.systemPrompt.context({
     name: 'codex:environment',
     order: 118,

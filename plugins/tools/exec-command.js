@@ -19,6 +19,17 @@
  *   unified_exec_output_schema ({chunk_id, wall_time_seconds, exit_code,
  *   session_id, original_token_count, output}; required wall_time_seconds +
  *   output).
+ * - escalation (2026-08-16 dsh adaptation): codex's sandbox concept is a real
+ *   OS isolation layer (seatbelt/landlock/bwrap/restricted-token) that dsh
+ *   does NOT replicate — exec_command runs through the host shell seam under
+ *   the DSH sandbox policy. The model-facing escalation vocabulary
+ *   (sandbox_permissions/justification/prefix_rule) is therefore meaningful
+ *   ONLY when the DSH host sandbox is actually restricted AND the approval
+ *   policy can prompt; outside that window the fields are inert model echo
+ *   noise — accepted and ignored, never hard-failing the call. Inside it, the
+ *   codex pairing rule (justification ⇔ require_escalated) and approval flow
+ *   apply unchanged, and an approved `prefix_rule` seeds a session-level
+ *   approval cache so matching commands skip the gate.
  * - result text: "Chunk ID: {id}" → "Wall time: {x:.4} seconds" →
  *   "Process exited with code N" → "Process running with session ID N" →
  *   "Original token count: N" → "Output:" → body (context.rs:442-468).
@@ -44,6 +55,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
+import { omitBlank } from './echo-noise.js?v=2'
 import { DECISION, classify, tokenize } from '../policy/exec-policy.js'
 
 export const name = 'tool-codex-exec'
@@ -516,19 +528,23 @@ function registerExecCommand(ctx, config) {
       const owner = exec.agent
       if (owner === undefined) throw new Error('exec_command requires an owning agent session')
       if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) throw new Error('cmd must be a non-empty string')
+      // Blank echo fields are treated as omitted: models routinely echo the
+      // schema's optional string fields as "" (shell/workdir/justification),
+      // which must not hard-fail the call (echo-noise.js normalization).
+      args = omitBlank(args, 'shell')
+      args = omitBlank(args, 'workdir')
       if (args.shell !== undefined && !SHELL_VALUES.has(args.shell))
         throw new Error(`unsupported shell "${args.shell}": this deployment only provides git bash (bash/shell/git-bash)`)
-      // Blank justification is treated as omitted: models routinely echo the
-      // schema's optional fields as empty strings (e.g. justification: "" with
-      // sandbox_permissions: "use_default"), which must not hard-fail the call.
-      const justification = typeof args.justification === 'string' ? args.justification.trim() : undefined
-      if (justification !== undefined && justification !== '' && args.sandbox_permissions !== 'require_escalated') {
-        throw new Error(
-          '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.'
-        )
-      }
 
-      await applyApprovalGate(ctx, owner, exec, args, config)
+      // Adaptive escalation (2026-08-16): the codex sandbox vocabulary is only
+      // meaningful when the DSH host sandbox is actually restricted AND the
+      // approval policy can prompt. Outside that window (full access, or
+      // approval `never`) the fields are inert model echo noise — accepted and
+      // ignored, never hard-failing the call. Inside it, the codex pairing
+      // rule and the approval flow apply unchanged.
+      const escalation = resolveEscalation(ctx, owner, config, args, registry.forOwner(owner))
+
+      await applyApprovalGate(ctx, owner, exec, args, config, escalation)
       const floor = config.yieldFloorMs ?? (process.platform === 'win32' ? WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS : MIN_YIELD_TIME_MS)
       const yieldMs = clamp(args.yield_time_ms, floor, MAX_YIELD_TIME_MS, DEFAULT_YIELD_TIME_MS)
       const maxTokens = resolveModelOutputMaxTokens(args, config)
@@ -716,18 +732,64 @@ function sandboxRestricted(ctx) {
   return mode !== undefined && mode !== 'danger-full-access'
 }
 
+/** Whether argv starts with the session pre-approved prefix token list. */
+function matchesPrefix(argv, prefix) {
+  if (prefix.length === 0 || argv.length < prefix.length) return false
+  return prefix.every((token, i) => argv[i] === token)
+}
+
+/**
+ * Whether the codex escalation vocabulary is LIVE in this session. Escalation
+ * means "run wider than a restricted sandbox", which only exists when the DSH
+ * host sandbox is actually restricted AND the approval policy can prompt (a
+ * session-level or configured `never` disables every prompt). This is the DSH
+ * adaptation of codex's sandbox concept: the OS-isolation half is not
+ * replicated, so the model-facing escalation fields are meaningful only where
+ * DSH's own restricted-sandbox + approval seam can back them.
+ */
+function escalationLive(ctx, owner, config) {
+  if (effectiveCodexPolicy(ctx, owner, config) === 'never') return false
+  return sandboxRestricted(ctx)
+}
+
+/**
+ * Resolve the escalation arguments into their effective meaning for ONE call.
+ * Outside the live window every field is dropped (inert model echo noise —
+ * the 2026-08-16 adaptation that replaced the always-on pairing error). Inside
+ * it, the codex pairing rule is enforced (a non-blank `justification` requires
+ * `require_escalated`; blank justification is treated as omitted) and the
+ * session-approved-prefix cache is wired for `prefix_rule`.
+ */
+function resolveEscalation(ctx, owner, config, args, sessionEntry) {
+  const prefixes = (sessionEntry.prefixes ??= [])
+  const rawJustification = typeof args.justification === 'string' ? args.justification.trim() : undefined
+  const requestsEscalation = args.sandbox_permissions === 'require_escalated'
+  const prefixRule = Array.isArray(args.prefix_rule) ? args.prefix_rule.filter((token) => typeof token === 'string') : []
+  if (!escalationLive(ctx, owner, config)) {
+    return { live: false, requestsEscalation: false, justification: undefined, prefixRule: [], prefixes }
+  }
+  if (rawJustification !== undefined && rawJustification !== '' && !requestsEscalation) {
+    throw new Error(
+      '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.'
+    )
+  }
+  return { live: true, requestsEscalation, justification: rawJustification, prefixRule, prefixes }
+}
+
 /**
  * Apply the codex policy layer before execution: forbidden throws, prompt
  * goes through the DSH approval seam (the same seam the bash tool's sandbox
- * escalation uses), allowed-once proceeds.
+ * escalation uses), allowed-once proceeds. A session pre-approved prefix
+ * (codex `prefix_rule` approved together with an escalation request) lets
+ * matching commands skip the gate.
  */
-async function applyApprovalGate(ctx, owner, exec, args, config) {
+async function applyApprovalGate(ctx, owner, exec, args, config, escalation) {
   const argv = tokenize(args.cmd)
-  const requestsEscalation = args.sandbox_permissions === 'require_escalated'
+  if (escalation.live && escalation.prefixes.some((prefix) => matchesPrefix(argv, prefix))) return
   const decision = classify(argv, {
     policy: effectiveCodexPolicy(ctx, owner, config),
     sandboxRestricted: sandboxRestricted(ctx),
-    requestsEscalation,
+    requestsEscalation: escalation.live ? escalation.requestsEscalation : false,
     platform: process.platform,
   })
   if (decision.decision === DECISION.forbidden) {
@@ -736,9 +798,12 @@ async function applyApprovalGate(ctx, owner, exec, args, config) {
   if (decision.decision !== DECISION.prompt) return
   const approval = ctx.get('approval')
   if (approval === undefined) throw new Error('command requires approval but the approval service is unavailable')
-  const reason = requestsEscalation
-    ? (typeof args.justification === 'string' && args.justification.trim().length > 0 ? args.justification.trim() : 'model requested escalation')
-    : `command classified as ${decision.reason}`
+  const reason =
+    escalation.live && escalation.requestsEscalation
+      ? (escalation.justification !== undefined && escalation.justification.length > 0
+          ? escalation.justification
+          : 'model requested escalation')
+      : `command classified as ${decision.reason}`
   const outcome = await approval.request({
     agent: owner,
     toolName: 'exec_command',
@@ -746,7 +811,14 @@ async function applyApprovalGate(ctx, owner, exec, args, config) {
     reason,
     signal: exec.signal,
   })
-  if (outcome === 'allowed-once') return
+  if (outcome === 'allowed-once') {
+    // An approved escalation may carry a reusable approval prefix: subsequent
+    // commands starting with those tokens skip the gate for the session.
+    if (escalation.live && escalation.requestsEscalation && escalation.prefixRule.length > 0) {
+      escalation.prefixes.push(escalation.prefixRule)
+    }
+    return
+  }
   if (outcome === 'rejected') throw new Error('command rejected by the user')
   throw new Error(`command approval unavailable (${outcome})`)
 }

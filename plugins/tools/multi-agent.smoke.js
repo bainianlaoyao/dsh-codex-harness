@@ -15,14 +15,17 @@ const interrupts = []
 const startedRequests = []
 let nextChild = 1
 let childStatus = 'running'
+let forkRegistered = true
 
 const ctx = {
   tools: { register: (definition) => captured.push(definition) },
   subagents: {
     async startContinuable({ provider, request, signal }) {
-      assert.equal(provider, 'spawn', 'provider from config')
-      startedRequests.push({ prompt: request.prompt, agentOptions: request.agentOptions })
+      startedRequests.push({ provider, prompt: request.prompt, agentOptions: request.agentOptions })
       return { childId: `child-${nextChild++}`, messageId: 'msg-1' }
+    },
+    getProvider(name) {
+      return name === 'fork' && forkRegistered ? { name: 'fork' } : undefined
     },
     async followup(parent, childId, content, options) {
       followups.push({ childId: String(childId), text: content[0].text, sender: String(options.source.senderSessionId) })
@@ -121,6 +124,50 @@ await assert.rejects(
   /Provide one of: message or items/,
   'spawn with neither message nor items rejected'
 )
+
+// ── echo-noise normalization (2026-08-16 regression) ───────────────────────
+// gpt-5.6 via the OpenAI wire echoes the full optional schema on every call:
+// a real `message` next to an items array of all-empty stub objects (and vice
+// versa: a blank message next to real items) must not hard-fail the call.
+// Codex error strings for genuinely malformed inputs are preserved above.
+const echoSpawn = await run('spawn_agent', {
+  agent_type: 'default',
+  fork_context: true,
+  items: [{ audio_url: '', image_url: '', name: '', path: '', text: '', type: '' }],
+  message: 'Review the repo and propose a minimal S4 event-sourcing design',
+  model: '',
+  reasoning_effort: 'high',
+  service_tier: '',
+})
+assert.equal(echoSpawn.agent_id, 'child-3', 'real message + all-stub items spawns normally')
+assert.deepEqual(startedRequests[startedRequests.length - 1].prompt, [
+  { type: 'text', text: 'Review the repo and propose a minimal S4 event-sourcing design' },
+], 'stub items dropped, message wins')
+
+const reverseEcho = await run('spawn_agent', {
+  message: '   ',
+  items: [{ type: 'text', text: 'from real items' }],
+})
+assert.equal(reverseEcho.agent_id, 'child-4', 'blank message + real items spawns normally')
+assert.deepEqual(startedRequests[startedRequests.length - 1].prompt, [{ type: 'text', text: 'from real items' }], 'blank message dropped, items win')
+
+const stubItemsOnly = await run('spawn_agent', { items: [{ type: '', text: '   ' }] }).catch((error) => error)
+assert.ok(stubItemsOnly instanceof Error && /Provide one of: message or items/.test(stubItemsOnly.message), 'items with only echo stubs → one-of error (codex text)')
+
+const mixedItems = await run('spawn_agent', { items: [{ audio_url: '', path: '' }, { type: 'mention', path: 'app://connector' }] })
+assert.equal(mixedItems.agent_id, 'child-5', 'stub entries filtered out, real entry wins')
+assert.deepEqual(startedRequests[startedRequests.length - 1].prompt, [{ type: 'text', text: '[mention] app://connector' }], 'stub entry not rendered into the prompt')
+
+// ── fork_context maps to the DSH `fork` provider (history seed) ────────────
+const forkSpawn = await run('spawn_agent', { message: 'fork me', fork_context: true })
+assert.equal(forkSpawn.agent_id, 'child-6', 'fork_context=true spawns normally')
+assert.equal(startedRequests[startedRequests.length - 1].provider, 'fork', 'fork_context=true selects the fork provider (parent history seed)')
+const plainSpawn = await run('spawn_agent', { message: 'plain me' })
+assert.equal(startedRequests[startedRequests.length - 1].provider, 'spawn', 'no fork_context uses the configured provider')
+forkRegistered = false
+const fallbackSpawn = await run('spawn_agent', { message: 'fallback me', fork_context: true })
+assert.equal(startedRequests[startedRequests.length - 1].provider, 'spawn', 'fork requested without a registered fork provider falls back to the configured provider')
+forkRegistered = true
 
 // ── wait_agent timeout/targets validation ──────────────────────────────────
 await assert.rejects(
