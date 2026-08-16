@@ -151,6 +151,13 @@ assert.equal(goodShell.exit_code, 0, 'bash/shell/git-bash accepted and map to th
 const jw = await run(execCommand, { cmd: 'echo hi', justification: 'because' }).catch((error) => error)
 assert.ok(jw instanceof Error && jw.message.includes('justification') && jw.message.includes('require_escalated'), 'justification requires sandbox_permissions')
 
+// blank justification is treated as omitted: models echo optional fields as
+// empty strings (e.g. justification: "" with sandbox_permissions: "use_default")
+const blankJ = await run(execCommand, { cmd: 'echo hi', justification: '', sandbox_permissions: 'use_default' })
+assert.equal(blankJ.exit_code, 0, 'blank justification with use_default runs normally')
+const blankJ2 = await run(execCommand, { cmd: 'echo hi', justification: '   ', sandbox_permissions: 'use_default' })
+assert.equal(blankJ2.exit_code, 0, 'whitespace-only justification with use_default runs normally')
+
 // ── yield → session id → write_stdin poll ──────────────────────────────────
 const slow = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
 assert.equal(typeof slow.session_id, 'number', 'yielded session id')
@@ -248,6 +255,9 @@ assert.equal(approvalLog.length, beforeEscalation, 'unrestricted sandbox skips e
 sandboxMode = 'workspace-write'
 await run(execCommand, { cmd: 'curl http://x', sandbox_permissions: 'require_escalated', justification: 'needs network' })
 assert.equal(approvalLog[approvalLog.length - 1].reason, 'needs network', 'escalation justification reaches the UI under a restricted sandbox')
+
+await run(execCommand, { cmd: 'curl http://y', sandbox_permissions: 'require_escalated', justification: '' })
+assert.equal(approvalLog[approvalLog.length - 1].reason, 'model requested escalation', 'blank escalation justification falls back to the fixed reason')
 sandboxMode = 'danger-full-access'
 
 // ── schema parity spot checks (shell_spec.rs) ──────────────────────────────

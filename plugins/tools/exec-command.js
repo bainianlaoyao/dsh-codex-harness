@@ -518,11 +518,16 @@ function registerExecCommand(ctx, config) {
       if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) throw new Error('cmd must be a non-empty string')
       if (args.shell !== undefined && !SHELL_VALUES.has(args.shell))
         throw new Error(`unsupported shell "${args.shell}": this deployment only provides git bash (bash/shell/git-bash)`)
-      if (args.justification !== undefined && args.sandbox_permissions !== 'require_escalated') {
+      // Blank justification is treated as omitted: models routinely echo the
+      // schema's optional fields as empty strings (e.g. justification: "" with
+      // sandbox_permissions: "use_default"), which must not hard-fail the call.
+      const justification = typeof args.justification === 'string' ? args.justification.trim() : undefined
+      if (justification !== undefined && justification !== '' && args.sandbox_permissions !== 'require_escalated') {
         throw new Error(
           '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.'
         )
       }
+
       await applyApprovalGate(ctx, owner, exec, args, config)
       const floor = config.yieldFloorMs ?? (process.platform === 'win32' ? WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS : MIN_YIELD_TIME_MS)
       const yieldMs = clamp(args.yield_time_ms, floor, MAX_YIELD_TIME_MS, DEFAULT_YIELD_TIME_MS)
@@ -732,7 +737,7 @@ async function applyApprovalGate(ctx, owner, exec, args, config) {
   const approval = ctx.get('approval')
   if (approval === undefined) throw new Error('command requires approval but the approval service is unavailable')
   const reason = requestsEscalation
-    ? (typeof args.justification === 'string' && args.justification.length > 0 ? args.justification : 'model requested escalation')
+    ? (typeof args.justification === 'string' && args.justification.trim().length > 0 ? args.justification.trim() : 'model requested escalation')
     : `command classified as ${decision.reason}`
   const outcome = await approval.request({
     agent: owner,
