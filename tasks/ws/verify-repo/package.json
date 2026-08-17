@@ -1,0 +1,9 @@
+{
+  "name": "verify-repo",
+  "private": true,
+  "type": "module",
+  "description": "Tiny scratch repo for the dsh-codex-mode live-verification task (tasks/live-verify-fixes.md).",
+  "scripts": {
+    "test": "node --test"
+  }
+}

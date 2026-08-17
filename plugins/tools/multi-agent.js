@@ -80,23 +80,26 @@ const COLLAB_ITEM_FIELDS = ['type', 'text', 'image_url', 'audio_url', 'path', 'n
 /**
  * Normalize model echo noise before the codex message-vs-items union — the
  * same adaptation as exec_command's blank-justification exemption: models
- * routinely echo a tool's full optional schema, so `items` filled with
- * all-empty stub objects next to a real `message` (and a blank `message`
- * next to real items) must not hard-fail the call.
- * - an items array with ≥1 entry but NO meaningful entry is treated as
- *   absent (echo stub); a deliberate `[]` keeps the codex "Items can't be
- *   empty" error;
- * - a blank/whitespace message next to meaningful items is dropped so the
- *   items win (reverse echo shape); a blank message as the ONLY input keeps
- *   the codex "Empty message can't be sent to an agent" error.
+ * routinely echo a tool's full optional schema, so `items` echoes (an empty
+ * array, or all-empty stub objects) next to a real `message` — and a blank
+ * `message` next to real items — must not hard-fail the call.
+ * - a REAL message wins over items that carry NO payload: `items: []` or an
+ *   all-stub array next to a non-blank message is dropped (18:37 session
+ *   shape: message + `items:[]` -> spawn with the message);
+ * - items win only for the reverse echo (blank message + meaningful items);
+ * - with no message, a lone `items: []` keeps the codex "Items can't be
+ *   empty" error and a lone all-stub array keeps the one-of error;
+ * - non-array items (undefined/null) never drive the union.
  * Genuinely providing both non-empty inputs still fails with the codex error.
  */
 function normalizeCollabInput(message, items) {
-  const meaningfulItems = stripStubEntries(items, COLLAB_ITEM_FIELDS)
+  const meaningfulItems = Array.isArray(items) ? stripStubEntries(items, COLLAB_ITEM_FIELDS) : undefined
   const hasMeaningfulItems = Array.isArray(meaningfulItems) && meaningfulItems.length > 0
+  const hasRealMessage = typeof message === 'string' && message.trim().length > 0
+  const messageWins = hasRealMessage && !hasMeaningfulItems
   return {
-    message: isBlankText(message) && hasMeaningfulItems ? undefined : message,
-    items: meaningfulItems,
+    message: messageWins ? message : isBlankText(message) && hasMeaningfulItems ? undefined : message,
+    items: messageWins ? undefined : meaningfulItems,
   }
 }
 

@@ -169,6 +169,24 @@ const fallbackSpawn = await run('spawn_agent', { message: 'fallback me', fork_co
 assert.equal(startedRequests[startedRequests.length - 1].provider, 'spawn', 'fork requested without a registered fork provider falls back to the configured provider')
 forkRegistered = true
 
+// ── items:[] echoed next to a real message (18:37 session shape) ────────────
+// The model echoes the optional items array EMPTY beside a real message;
+// message must win. A lone items:[] still errors (asserted above).
+const emptyItemsEcho = await run('spawn_agent', {
+  agent_type: 'default',
+  fork_context: true,
+  items: [],
+  message: 'Review src/event-sourcing.ts and write findings to REVIEW.md only',
+  model: 'gpt-5.6-terra',
+  reasoning_effort: 'medium',
+  service_tier: 'default',
+})
+assert.equal(emptyItemsEcho.agent_id, 'child-9', 'real message + empty items array spawns normally')
+assert.deepEqual(startedRequests[startedRequests.length - 1].prompt, [
+  { type: 'text', text: 'Review src/event-sourcing.ts and write findings to REVIEW.md only' },
+], 'empty items dropped, message wins')
+assert.equal(startedRequests[startedRequests.length - 1].provider, 'fork', 'echo shape with fork_context=true still selects the fork provider')
+
 // ── wait_agent timeout/targets validation ──────────────────────────────────
 await assert.rejects(
   () => run('wait_agent', { targets: [], timeout_ms: 10000 }),

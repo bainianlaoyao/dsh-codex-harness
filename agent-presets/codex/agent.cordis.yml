@@ -405,7 +405,7 @@
 # `subagents` registry and its spawn/fork backends live in the HOST
 # composition, so this consumer-only row sits loose.
 - id: tool-codex-multi-agent
-  name: '../../plugins/tools/multi-agent.js?v=3'
+  name: '../../plugins/tools/multi-agent.js?v=4'
   config:
     provider: spawn
 
