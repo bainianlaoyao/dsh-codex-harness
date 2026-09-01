@@ -27,6 +27,11 @@ node replay-all.mjs --only T4-apply-patch-add-update   # 单条
 
 前置：scripts/install.ps1 已建 junction；codex CLI 在 PATH（或 CODEX_BIN）；本机为 win32 + git bash。每条轨迹约 1 分钟（codex/DSH 各一次完整启动 + T7 的 10 秒 yield）。
 
+> **历史快照**：轨迹 T2/T3 使用 `update_plan`、子代理轨迹使用 `spawn_agent`/
+> `wait_agent` —— 这些 codex 形状工具已随轻量改造从 `codex` 预设移除（改用
+> DSH 原生 `todo_write`/`subagent`）。`out/` 报告是改造前表面的冻结记录；
+> 重跑 DSH 侧需先改写 trajectories.mjs 里的工具名。
+
 ## 上下文规范化与分类
 
 - 行类型：user / assistant / tool-call（name+arguments）/ tool-result（output）

@@ -10,15 +10,10 @@ import assert from 'node:assert/strict'
 
 const baseUrl = new URL('./', import.meta.url)
 const rows = [
-  '../../plugins/tools/exec-command.js?v=7',
+  '../../plugins/tools/exec-command.js?v=10',
   '../../plugins/tools/apply-patch.js?v=3',
-  '../../plugins/tools/update-plan.js?v=1',
   '../../plugins/tools/view-image.js?v=1',
-  '../../plugins/tools/request-user-input.js?v=1',
-  '../../plugins/tools/multi-agent.js?v=4',
   '../../plugins/tools/restrict.js?v=1',
-  '../../plugins/tools/prompt-align.js?v=2',
-  '../../plugins/harness/codex-compactor.js?v=1',
 ]
 
 for (const specifier of rows) {

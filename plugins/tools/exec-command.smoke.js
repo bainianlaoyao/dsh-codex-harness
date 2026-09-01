@@ -2,7 +2,7 @@
  * M1-R2 smoke test for dsh-codex/tools/exec-command.js — mock `ctx.shell`
  * (the host shell seam: resolve + start + background proc handles) with fake
  * processes that settle on timers, so the foreground-completion, yield +
- * write_stdin poll, control-byte, registry-eviction, and approval-gate paths
+ * write_stdin poll, control-byte, and registry-eviction paths
  * all run without a real shell.
  *
  * Semantics under test match codex HEAD 5bc8da6d78 (unified_exec):
@@ -71,30 +71,13 @@ function scriptFor(command) {
 
 const captured = []
 const started = []
-let sandboxMode = 'danger-full-access'
-const approvalLog = []
-let approvalOutcome = 'allowed-once'
-let sessionOverride
 const ctx = {
   tools: { register: (definition) => captured.push(definition) },
   get(service) {
-    if (service === 'approval')
-      return {
-        config: { policy: 'ask' },
-        overrideOf() {
-          return sessionOverride
-        },
-        async request(req) {
-          approvalLog.push(req)
-          return approvalOutcome
-        },
-      }
-    if (service === 'fs') return { sandboxMode }
     if (service === 'shellEnv') return { collect: () => ({ DSH_TEST: '1' }) }
     return undefined
   },
   shell: {
-    sandboxMode,
     resolve(request) {
       return { ...request, workdir: request.workdir ?? 'C:/work', timeoutMs: 30000, stdoutMaxBytes: 1 << 20 }
     },
@@ -153,47 +136,42 @@ const blankEcho = await run(execCommand, { cmd: 'echo hi', shell: '', workdir: '
 assert.equal(blankEcho.exit_code, 0, 'blank shell + whitespace workdir run normally')
 assert.equal(started[started.length - 1].workdir, 'C:/work', 'blank workdir falls back to the session cwd')
 
-// ── justification pairing (handlers/mod.rs shared rule) — ADAPTIVE ────────
-// The codex sandbox vocabulary is meaningful only inside the live escalation
-// window (restricted host sandbox + askable approval policy); outside it the
-// fields are inert model echo noise and must never hard-fail the call
-// (2026-08-16 adaptation, extending the blank-justification exemption).
-const inertJ = await run(execCommand, { cmd: 'echo hi', justification: 'because' })
-assert.equal(inertJ.exit_code, 0, 'non-blank justification without escalation is inert under an unrestricted sandbox')
-const inertEsc = await run(execCommand, { cmd: 'echo hi', sandbox_permissions: 'require_escalated', justification: 'because' })
-assert.equal(inertEsc.exit_code, 0, 'require_escalated is inert under an unrestricted sandbox (codex Skip)')
-
-// blank justification is treated as omitted in BOTH windows: models echo
-// optional fields as empty strings (e.g. justification: "" with use_default)
-sandboxMode = 'workspace-write'
-const blankRestricted = await run(execCommand, { cmd: 'echo hi', justification: '', sandbox_permissions: 'use_default' })
-assert.equal(blankRestricted.exit_code, 0, 'blank justification + use_default runs inside the live window')
-const jw = await run(execCommand, { cmd: 'echo hi', justification: 'because' }).catch((error) => error)
-assert.ok(jw instanceof Error && jw.message.includes('justification') && jw.message.includes('require_escalated'), 'justification requires sandbox_permissions inside the live window')
-sandboxMode = 'danger-full-access'
-
-const nonBlankInert = await run(execCommand, { cmd: 'echo hi', justification: '   ', sandbox_permissions: 'use_default' })
-assert.equal(nonBlankInert.exit_code, 0, 'whitespace justification + use_default runs normally')
-
-// Regression: gpt-5.6 via the OpenAI wire echoes the full optional schema on
-// every call — justification:"" + sandbox_permissions:"use_default" +
-// prefix_rule:[] / shell / login / tty / max_output_tokens / workdir /
-// yield_time_ms (observed failing shape, 2026-08-16 session). All must run,
-// never hard-fail the call.
 const echoShape = await run(execCommand, {
   cmd: "pwd && rg --files -g 'AGENTS.md' -g '!node_modules' -g '!dist' -g '!build'",
-  justification: '',
   login: false,
   max_output_tokens: 2000,
-  prefix_rule: [],
-  sandbox_permissions: 'use_default',
   shell: 'bash',
   tty: false,
-  workdir: 'D:/Data/DEV/work',
+  workdir: process.cwd().replace(/\\/g, '/'),
   yield_time_ms: 10000,
 })
-assert.equal(echoShape.exit_code, 0, 'model echo shape (blank justification + use_default + full optional set) runs normally')
+assert.equal(echoShape.exit_code, 0, 'complete supported argument shape runs normally')
 assert.equal(echoShape.output, 'hi\n', 'command actually executed through the shell seam')
+assert.equal(started[started.length - 1].workdir, process.cwd(), 'forward-slash absolute workdir canonicalized to backslashes')
+
+// ── workdir normalization (Windows host shell) ──────────────────────────────
+// The cc-switch GPT wire emits MSYS/git-bash paths ("/d/..."); passed through
+// verbatim they make spawn fail with a misleading `spawn bash ENOENT` (Windows
+// surfaces an invalid cwd as ENOENT). They must normalize to Windows paths.
+if (process.platform === 'win32') {
+  const real = process.cwd()
+  const msys = '/' + real[0].toLowerCase() + real.slice(2).replace(/\\/g, '/')
+  const msysRun = await run(execCommand, { cmd: 'echo hi', workdir: msys })
+  assert.equal(msysRun.exit_code, 0, 'MSYS /d/... workdir normalized and runs')
+  assert.equal(started[started.length - 1].workdir, real, 'MSYS workdir normalized to the Windows absolute path')
+}
+
+const missingPosix = await run(execCommand, { cmd: 'echo hi', workdir: '/d/Data/DEV/does-not-exist-xyz' }).catch((error) => error)
+assert.ok(missingPosix instanceof Error && /workdir is not an existing directory/.test(missingPosix.message), 'nonexistent workdir rejected with a clear message')
+assert.ok(/resolved to [A-Z]:/.test(missingPosix.message), 'clear error mentions the resolved Windows path')
+
+const missingWin = await run(execCommand, { cmd: 'echo hi', workdir: 'D:\\Data\\DEV\\does-not-exist-xyz' }).catch((error) => error)
+assert.ok(missingWin instanceof Error && /workdir is not an existing directory/.test(missingWin.message), 'nonexistent Windows workdir also rejected clearly')
+
+// POSIX shell aliases are accepted (the cc-switch wire echoes them; this
+// deployment has exactly one shell backend).
+const posixShell = await run(execCommand, { cmd: 'echo hi', shell: '/bin/sh' })
+assert.equal(posixShell.exit_code, 0, 'POSIX shell alias /bin/sh accepted and maps to the git-bash backend')
 
 // ── yield → session id → write_stdin poll ──────────────────────────────────
 const slow = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
@@ -255,75 +233,30 @@ assert.ok(/…\d+ tokens truncated…/.test(mid), 'token-truncation marker prese
 const ft = formattedTruncateText('a\nb\nc\nd\ne\nf\ng\nh\ni\nj', 2)
 assert.ok(ft.startsWith('Warning: truncated output (original token count: 5)\nTotal output lines: 10\n\n'), 'formatted truncation prefix: tokens=ceil(19/4)=5, lines=10')
 
-// ── approval gate ───────────────────────────────────────────────────────────
-assert.equal(approvalLog.length, 0, 'safe command (echo) ran without approval')
-
-const dangerous = await run(execCommand, { cmd: 'rm -rf build' })
-assert.equal(dangerous.exit_code, 0, 'dangerous command runs after approval')
-assert.equal(approvalLog.length, 1, 'dangerous command asked once')
-assert.equal(approvalLog[0].toolName, 'exec_command')
-assert.ok(approvalLog[0].reason.includes('dangerous'), 'approval reason carries classification')
-
-approvalOutcome = 'rejected'
-await assert.rejects(
-  () => run(execCommand, { cmd: 'rm -rf build' }),
-  /command rejected by the user/,
-  'rejected approval blocks the command'
-)
-approvalOutcome = 'allowed-once'
-
-sessionOverride = 'never'
-const beforeNever = approvalLog.length
-await assert.rejects(
-  () => run(execCommand, { cmd: 'rm -rf build' }),
-  /command forbidden by approval policy: dangerous/,
-  'never policy forbids dangerous commands without prompting'
-)
-assert.equal(approvalLog.length, beforeNever, 'never policy does not ask')
-sessionOverride = undefined
-
-// explicit escalation: under an unrestricted sandbox codex SKIPS approval
-// (default_exec_approval_requirement), so require_escalated only prompts under
-// a restricted sandbox — switch the fs mock to workspace-write to exercise it.
-const beforeEscalation = approvalLog.length
-await run(execCommand, { cmd: 'curl http://x', sandbox_permissions: 'require_escalated', justification: 'needs network' })
-assert.equal(approvalLog.length, beforeEscalation, 'unrestricted sandbox skips escalation prompts (codex Skip)')
-
-sandboxMode = 'workspace-write'
-await run(execCommand, { cmd: 'curl http://x', sandbox_permissions: 'require_escalated', justification: 'needs network' })
-assert.equal(approvalLog[approvalLog.length - 1].reason, 'needs network', 'escalation justification reaches the UI under a restricted sandbox')
-
-await run(execCommand, { cmd: 'curl http://y', sandbox_permissions: 'require_escalated', justification: '' })
-assert.equal(approvalLog[approvalLog.length - 1].reason, 'model requested escalation', 'blank escalation justification falls back to the fixed reason')
-sandboxMode = 'danger-full-access'
-
-// ── session approved prefix (codex prefix_rule) ─────────────────────────────
-// An escalation request approved together with a prefix_rule caches the prefix
-// for the session: subsequent commands starting with those tokens skip the
-// gate, non-matching commands still ask.
-sandboxMode = 'workspace-write'
-const beforePrefix = approvalLog.length
-await run(execCommand, { cmd: 'rm -rf build', sandbox_permissions: 'require_escalated', justification: 'clean build dir', prefix_rule: ['rm', '-rf', 'build'] })
-assert.equal(approvalLog.length, beforePrefix + 1, 'escalation with prefix_rule asks once')
-assert.equal(approvalLog[approvalLog.length - 1].reason, 'clean build dir', 'escalation reason reaches the UI')
-await run(execCommand, { cmd: 'rm -rf build', sandbox_permissions: 'use_default', justification: '' })
-assert.equal(approvalLog.length, beforePrefix + 1, 'matching prefix skips the gate without re-prompting')
-await run(execCommand, { cmd: 'rm -rf src', sandbox_permissions: 'use_default', justification: '' })
-assert.equal(approvalLog.length, beforePrefix + 2, 'non-matching command still asks')
-sandboxMode = 'danger-full-access'
-
-// ── schema parity spot checks (shell_spec.rs) ──────────────────────────────
+// ── schema compatibility spot checks ───────────────────────────────────────
 const params = execCommand.parameters.properties ?? {}
-for (const key of ['cmd', 'workdir', 'tty', 'yield_time_ms', 'max_output_tokens', 'shell', 'login', 'sandbox_permissions', 'justification', 'prefix_rule'])
+for (const key of ['cmd', 'workdir', 'tty', 'yield_time_ms', 'max_output_tokens', 'shell', 'login'])
   assert.ok(params[key] !== undefined, 'exec_command has ' + key)
 assert.ok((execCommand.parameters.required ?? []).includes('cmd'), 'cmd required')
-assert.equal(params.sandbox_permissions.enum.join(','), 'use_default,require_escalated', 'sandbox_permissions enum matches the default tool')
+for (const key of ['sandbox_permissions', 'justification', 'prefix_rule', 'description'])
+  assert.equal(params[key], undefined, 'compatibility field stays out of the wire schema: ' + key)
 assert.equal(execCommand.description, 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\nWindows safety rules:\n- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.\n- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.\n- When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.', 'exec_command description verbatim (win32)')
 assert.equal(writeStdin.description, 'Writes characters to an existing unified exec session and returns recent output.', 'write_stdin description verbatim')
 const stdinParams = writeStdin.parameters.properties ?? {}
 assert.ok((writeStdin.parameters.required ?? []).includes('session_id'), 'write_stdin session_id required')
 assert.equal(stdinParams.chars.description, 'Bytes to write to stdin. Defaults to empty, which polls without writing.', 'chars description verbatim')
 assert.equal(stdinParams.yield_time_ms.description, 'Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.', 'yield_time_ms description verbatim')
+
+// The parameter root is intentionally open, so provider compatibility
+// metadata is accepted without advertising empty schemas on the wire.
+for (const metadata of [
+  { justification: '', description: 'why', sandbox_permissions: null, prefix_rule: { mode: 'read-only' } },
+  { justification: { reason: 'compatibility echo' }, description: ['free-form'], sandbox_permissions: false, prefix_rule: 7 },
+]) {
+  const metadataRun = await run(execCommand, { cmd: 'echo hi', ...metadata })
+  assert.equal(metadataRun.exit_code, 0, 'compatibility metadata does not block execution')
+}
+
 // output schema = official unified_exec_output_schema
 const outProps = execCommand.output.schema.properties
 for (const key of ['chunk_id', 'wall_time_seconds', 'exit_code', 'session_id', 'original_token_count', 'output'])

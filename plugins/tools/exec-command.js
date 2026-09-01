@@ -1,35 +1,17 @@
 /**
  * dsh-codex M1 — `exec_command` + `write_stdin` over the DSH shell seam.
  *
- * Codex-parity implementation (HEAD 5bc8da6d78): schemas and descriptions from
- * shell_spec.rs, execution semantics from unified_exec (process_manager.rs),
- * and the model-facing result text from context.rs response_text()/
- * truncated_output(). The execution backend per decision D1-R2: the PTY seam
- * is UNAVAILABLE on this deployment (win32: `subprocess-local` has no process
- * inspector, so `ctx.terminals.spawn` fails), so commands run through the
- * host `ctx.shell` seam — the same git-bash executor the DSH `bash` tool
- * uses. The model still never sees the raw `bash` tool (tool-codex-restrict
- * denies it): every command passes the codex approval gate below.
+ * Codex-shaped command execution over the DSH shell seam. Commands run through
+ * the configured host shell and expose the familiar exec_command/write_stdin
+ * interface; sandbox and approval behavior remains owned by DSH.
  *
  * Alignment surface (official -> here):
  * - schema: exec_command (cmd required; workdir/tty/yield_time_ms/
- *   max_output_tokens/shell/login/sandbox_permissions/justification/
- *   prefix_rule) and write_stdin (session_id required; chars/yield_time_ms/
- *   max_output_tokens), descriptions verbatim, output schema = the official
+ *   max_output_tokens/shell/login) and write_stdin (session_id required;
+ *   chars/yield_time_ms/max_output_tokens), descriptions verbatim, output schema = the official
  *   unified_exec_output_schema ({chunk_id, wall_time_seconds, exit_code,
  *   session_id, original_token_count, output}; required wall_time_seconds +
  *   output).
- * - escalation (2026-08-16 dsh adaptation): codex's sandbox concept is a real
- *   OS isolation layer (seatbelt/landlock/bwrap/restricted-token) that dsh
- *   does NOT replicate — exec_command runs through the host shell seam under
- *   the DSH sandbox policy. The model-facing escalation vocabulary
- *   (sandbox_permissions/justification/prefix_rule) is therefore meaningful
- *   ONLY when the DSH host sandbox is actually restricted AND the approval
- *   policy can prompt; outside that window the fields are inert model echo
- *   noise — accepted and ignored, never hard-failing the call. Inside it, the
- *   codex pairing rule (justification ⇔ require_escalated) and approval flow
- *   apply unchanged, and an approved `prefix_rule` seeds a session-level
- *   approval cache so matching commands skip the gate.
  * - result text: "Chunk ID: {id}" → "Wall time: {x:.4} seconds" →
  *   "Process exited with code N" → "Process running with session ID N" →
  *   "Original token count: N" → "Output:" → body (context.rs:442-468).
@@ -55,8 +37,9 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
+import { statSync } from 'node:fs'
+import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { omitBlank } from './echo-noise.js?v=2'
-import { DECISION, classify, tokenize } from '../policy/exec-policy.js'
 
 export const name = 'tool-codex-exec'
 export const inject = ['tools', 'shell']
@@ -75,8 +58,60 @@ const UNIFIED_EXEC_OUTPUT_MAX_BYTES = 1024 * 1024 // 1 MiB collection cap
 const APPROX_BYTES_PER_TOKEN = 4
 const POLL_INTERVAL_MS = 100
 
-/** Accepted model-facing `shell` values; all map to the host git-bash executor. */
-const SHELL_VALUES = new Set(['bash', 'shell', 'git-bash'])
+/** Accepted model-facing `shell` values; all map to the host git-bash executor.
+ * POSIX names (`/bin/sh`, `/bin/bash`) are accepted because the cc-switch GPT
+ * wire habitually echoes them — this deployment has exactly one shell, so the
+ * aliases are harmless and keep the model out of failure loops. */
+const SHELL_VALUES = new Set(['bash', 'shell', 'git-bash', '/bin/sh', '/bin/bash'])
+
+/**
+ * Normalize a model-supplied `workdir` for the Windows host shell:
+ * - MSYS/git-bash drive form `/d/...` → `D:\...` — the model (cc-switch GPT
+ *   wire) routinely emits POSIX paths; passed through verbatim they make
+ *   `spawn` fail with a misleading `spawn bash ENOENT` (on Windows an
+ *   invalid cwd surfaces as ENOENT, not as a missing executable);
+ * - relative paths resolve against the session cwd (predictable, instead of
+ *   dangling off the server's own cwd);
+ * - anything else (drive-letter absolute, UNC) passes through, with forward
+ *   slashes canonicalized to backslashes on Windows (Windows accepts both,
+ *   but one canonical shape keeps preflight stat/error messages predictable).
+ */
+export function normalizeWorkdir(value, sessionCwd) {
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined
+  let path = value.trim()
+  if (process.platform === 'win32') {
+    const msys = /^\/([a-zA-Z])\/(.*)$/.exec(path)
+    if (msys !== null) path = `${msys[1].toUpperCase()}:\\${msys[2]}`
+    // Canonical separator form: Windows accepts forward slashes, but one
+    // canonical shape keeps preflight stat/error messages predictable.
+    path = path.replace(/\//g, '\\')
+  }
+  if (!isAbsolute(path)) path = resolvePath(sessionCwd, path)
+  return path
+}
+
+/**
+ * Resolve the model-facing `workdir` into a spawnable absolute path and
+ * pre-flight it: a nonexistent directory would otherwise surface as a bare
+ * `spawn bash ENOENT` (Windows invalid-cwd semantics) with no hint of the
+ * cause — the clear error names the original value and the fix.
+ */
+export function resolveWorkdir(value, sessionCwd) {
+  const normalized = normalizeWorkdir(value, sessionCwd)
+  if (normalized === undefined) return undefined
+  let isDirectory = false
+  try {
+    isDirectory = statSync(normalized).isDirectory()
+  } catch {}
+  if (!isDirectory) {
+    const resolved = normalized !== value ? ` (resolved to ${normalized})` : ''
+    throw new Error(
+      `workdir is not an existing directory: ${JSON.stringify(value)}${resolved}; ` +
+        'pass a Windows path such as D:\\path\\to\\dir, or omit workdir to use the session cwd'
+    )
+  }
+  return normalized
+}
 
 function pause() {
   return new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
@@ -507,18 +542,6 @@ function registerExecCommand(ctx, config) {
       },
       shell: { type: 'string', description: 'Shell binary to launch. Defaults to the user\'s default shell.' },
       login: { type: 'boolean', description: 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.' },
-      sandbox_permissions: {
-        type: 'string',
-        enum: ['use_default', 'require_escalated'],
-        description: 'Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.',
-      },
-      justification: { type: 'string', description: 'User-facing approval question for `require_escalated`; omit otherwise.' },
-      prefix_rule: {
-        type: 'array',
-        description:
-          'Reusable approval prefix for `cmd`, only with `sandbox_permissions: "require_escalated"`; for example ["git", "pull"].',
-        items: { type: 'string' },
-      },
     },
     output: {
       schema: execOutputSchema,
@@ -528,27 +551,16 @@ function registerExecCommand(ctx, config) {
       const owner = exec.agent
       if (owner === undefined) throw new Error('exec_command requires an owning agent session')
       if (typeof args.cmd !== 'string' || args.cmd.trim().length === 0) throw new Error('cmd must be a non-empty string')
-      // Blank echo fields are treated as omitted: models routinely echo the
-      // schema's optional string fields as "" (shell/workdir/justification),
-      // which must not hard-fail the call (echo-noise.js normalization).
+      // Blank optional strings are treated as omitted by the DSH adapter.
       args = omitBlank(args, 'shell')
       args = omitBlank(args, 'workdir')
       if (args.shell !== undefined && !SHELL_VALUES.has(args.shell))
         throw new Error(`unsupported shell "${args.shell}": this deployment only provides git bash (bash/shell/git-bash)`)
 
-      // Adaptive escalation (2026-08-16): the codex sandbox vocabulary is only
-      // meaningful when the DSH host sandbox is actually restricted AND the
-      // approval policy can prompt. Outside that window (full access, or
-      // approval `never`) the fields are inert model echo noise — accepted and
-      // ignored, never hard-failing the call. Inside it, the codex pairing
-      // rule and the approval flow apply unchanged.
-      const escalation = resolveEscalation(ctx, owner, config, args, registry.forOwner(owner))
-
-      await applyApprovalGate(ctx, owner, exec, args, config, escalation)
       const floor = config.yieldFloorMs ?? (process.platform === 'win32' ? WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS : MIN_YIELD_TIME_MS)
       const yieldMs = clamp(args.yield_time_ms, floor, MAX_YIELD_TIME_MS, DEFAULT_YIELD_TIME_MS)
       const maxTokens = resolveModelOutputMaxTokens(args, config)
-      const cwd = args.workdir !== undefined ? args.workdir : owner.session.header.cwd
+      const cwd = resolveWorkdir(args.workdir, owner.session.header.cwd) ?? owner.session.header.cwd
       const start = Date.now()
 
       const proc = startShell(ctx, exec, args.cmd, cwd)
@@ -710,125 +722,13 @@ export const Config = z.object({
   maxOutputTokens: z.number().step(1).min(1).default(DEFAULT_MAX_OUTPUT_TOKENS),
   /** exec_command yield floor; codex floors at 10000 ms on Windows. */
   yieldFloorMs: z.number().step(1).min(1),
-  /** Codex approval policy applied when the session policy is `ask` ('on-request' default). */
-  policy: z.union([z.const('on-request'), z.const('untrusted'), z.const('never')]).default('on-request'),
 })
-
-/**
- * Resolve the effective codex policy for one call: a session-level `never`
- * wins (codex `never` semantics — what would prompt is forbidden), otherwise
- * the plugin-configured policy applies.
- */
-function effectiveCodexPolicy(ctx, owner, config) {
-  const approval = ctx.get('approval')
-  const sessionPolicy = approval?.overrideOf?.(owner.session) ?? approval?.config?.policy
-  if (sessionPolicy === 'never') return 'never'
-  return config.policy
-}
-
-function sandboxRestricted(ctx) {
-  const fs = ctx.get('fs')
-  const mode = fs?.sandboxMode
-  return mode !== undefined && mode !== 'danger-full-access'
-}
-
-/** Whether argv starts with the session pre-approved prefix token list. */
-function matchesPrefix(argv, prefix) {
-  if (prefix.length === 0 || argv.length < prefix.length) return false
-  return prefix.every((token, i) => argv[i] === token)
-}
-
-/**
- * Whether the codex escalation vocabulary is LIVE in this session. Escalation
- * means "run wider than a restricted sandbox", which only exists when the DSH
- * host sandbox is actually restricted AND the approval policy can prompt (a
- * session-level or configured `never` disables every prompt). This is the DSH
- * adaptation of codex's sandbox concept: the OS-isolation half is not
- * replicated, so the model-facing escalation fields are meaningful only where
- * DSH's own restricted-sandbox + approval seam can back them.
- */
-function escalationLive(ctx, owner, config) {
-  if (effectiveCodexPolicy(ctx, owner, config) === 'never') return false
-  return sandboxRestricted(ctx)
-}
-
-/**
- * Resolve the escalation arguments into their effective meaning for ONE call.
- * Outside the live window every field is dropped (inert model echo noise —
- * the 2026-08-16 adaptation that replaced the always-on pairing error). Inside
- * it, the codex pairing rule is enforced (a non-blank `justification` requires
- * `require_escalated`; blank justification is treated as omitted) and the
- * session-approved-prefix cache is wired for `prefix_rule`.
- */
-function resolveEscalation(ctx, owner, config, args, sessionEntry) {
-  const prefixes = (sessionEntry.prefixes ??= [])
-  const rawJustification = typeof args.justification === 'string' ? args.justification.trim() : undefined
-  const requestsEscalation = args.sandbox_permissions === 'require_escalated'
-  const prefixRule = Array.isArray(args.prefix_rule) ? args.prefix_rule.filter((token) => typeof token === 'string') : []
-  if (!escalationLive(ctx, owner, config)) {
-    return { live: false, requestsEscalation: false, justification: undefined, prefixRule: [], prefixes }
-  }
-  if (rawJustification !== undefined && rawJustification !== '' && !requestsEscalation) {
-    throw new Error(
-      '`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.'
-    )
-  }
-  return { live: true, requestsEscalation, justification: rawJustification, prefixRule, prefixes }
-}
-
-/**
- * Apply the codex policy layer before execution: forbidden throws, prompt
- * goes through the DSH approval seam (the same seam the bash tool's sandbox
- * escalation uses), allowed-once proceeds. A session pre-approved prefix
- * (codex `prefix_rule` approved together with an escalation request) lets
- * matching commands skip the gate.
- */
-async function applyApprovalGate(ctx, owner, exec, args, config, escalation) {
-  const argv = tokenize(args.cmd)
-  if (escalation.live && escalation.prefixes.some((prefix) => matchesPrefix(argv, prefix))) return
-  const decision = classify(argv, {
-    policy: effectiveCodexPolicy(ctx, owner, config),
-    sandboxRestricted: sandboxRestricted(ctx),
-    requestsEscalation: escalation.live ? escalation.requestsEscalation : false,
-    platform: process.platform,
-  })
-  if (decision.decision === DECISION.forbidden) {
-    throw new Error(`command forbidden by approval policy: ${decision.reason}`)
-  }
-  if (decision.decision !== DECISION.prompt) return
-  const approval = ctx.get('approval')
-  if (approval === undefined) throw new Error('command requires approval but the approval service is unavailable')
-  const reason =
-    escalation.live && escalation.requestsEscalation
-      ? (escalation.justification !== undefined && escalation.justification.length > 0
-          ? escalation.justification
-          : 'model requested escalation')
-      : `command classified as ${decision.reason}`
-  const outcome = await approval.request({
-    agent: owner,
-    toolName: 'exec_command',
-    callId: exec.callId,
-    reason,
-    signal: exec.signal,
-  })
-  if (outcome === 'allowed-once') {
-    // An approved escalation may carry a reusable approval prefix: subsequent
-    // commands starting with those tokens skip the gate for the session.
-    if (escalation.live && escalation.requestsEscalation && escalation.prefixRule.length > 0) {
-      escalation.prefixes.push(escalation.prefixRule)
-    }
-    return
-  }
-  if (outcome === 'rejected') throw new Error('command rejected by the user')
-  throw new Error(`command approval unavailable (${outcome})`)
-}
 
 export function apply(ctx, config) {
   const resolved = {
     maxOutputBytes: config.maxOutputBytes ?? UNIFIED_EXEC_OUTPUT_MAX_BYTES,
     maxOutputTokens: config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     yieldFloorMs: config.yieldFloorMs ?? (process.platform === 'win32' ? WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS : MIN_YIELD_TIME_MS),
-    policy: config.policy ?? "on-request",
   }
   registerExecCommand(ctx, resolved)
 }
