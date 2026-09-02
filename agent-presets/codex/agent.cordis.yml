@@ -92,8 +92,13 @@
     fetch: false
     searchTimeoutMs: 60000
 
-# Native DSH compaction remains active instead of being replaced by a
-# Codex-specific compactor.
+# ── compaction ──────────────────────────────────────────────────────────────
+# Native DSH compaction (manual `/compact` + auto pressure compaction) instead
+# of a Codex-specific compactor. The web surface disables the host-plane rows
+# (`compaction-basic` / `command-compact` / `tool-result-pruner`), so a preset
+# that wants compaction MUST mount this group per-session — same shape as the
+# shipped `code` preset. Without it, `/compact` is not registered at all and
+# auto-compaction never runs.
 - id: compaction
   name: cordis:group
   group: true
