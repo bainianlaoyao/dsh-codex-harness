@@ -88,7 +88,7 @@ const ctx = {
   },
 }
 
-const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult } = await import('./exec-command.js')
+const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult, SHELL_VALUES } = await import('./exec-command.js')
 apply(ctx, { maxOutputBytes: 100000, yieldFloorMs: 250 })
 
 const execCommand = captured.find((t) => t.name === 'exec_command')
@@ -240,7 +240,17 @@ for (const key of ['cmd', 'workdir', 'tty', 'yield_time_ms', 'max_output_tokens'
 assert.ok((execCommand.parameters.required ?? []).includes('cmd'), 'cmd required')
 for (const key of ['sandbox_permissions', 'justification', 'prefix_rule', 'description'])
   assert.equal(params[key], undefined, 'compatibility field stays out of the wire schema: ' + key)
-assert.equal(execCommand.description, 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\nWindows safety rules:\n- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.\n- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.\n- When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.', 'exec_command description verbatim (win32)')
+assert.equal(
+  execCommand.description,
+  'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n' +
+    'This deployment provides exactly one shell: git bash. Write POSIX bash syntax; ' +
+    'only the `shell` values listed in the shell parameter are accepted.',
+  'exec_command description is the short git-bash contract (no PowerShell-centric win32 text)',
+)
+assert.ok(!/powershell|cmd\.exe|Start-Process|Remove-Item/i.test(execCommand.description), 'no PowerShell-only vocabulary in the description')
+assert.ok(params.shell.description.includes('only provides git bash'), 'shell param names git bash as the only shell')
+for (const value of SHELL_VALUES) assert.ok(params.shell.description.includes(value), 'shell param lists accepted value: ' + value)
+assert.ok(!/powershell|PowerShell/i.test(params.shell.description), 'shell param description has no PowerShell wording')
 assert.equal(writeStdin.description, 'Writes characters to an existing unified exec session and returns recent output.', 'write_stdin description verbatim')
 const stdinParams = writeStdin.parameters.properties ?? {}
 assert.ok((writeStdin.parameters.required ?? []).includes('session_id'), 'write_stdin session_id required')

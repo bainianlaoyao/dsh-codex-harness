@@ -62,7 +62,7 @@ const POLL_INTERVAL_MS = 100
  * POSIX names (`/bin/sh`, `/bin/bash`) are accepted because the cc-switch GPT
  * wire habitually echoes them — this deployment has exactly one shell, so the
  * aliases are harmless and keep the model out of failure loops. */
-const SHELL_VALUES = new Set(['bash', 'shell', 'git-bash', '/bin/sh', '/bin/bash'])
+export const SHELL_VALUES = new Set(['bash', 'shell', 'git-bash', '/bin/sh', '/bin/bash'])
 
 /**
  * Normalize a model-supplied `workdir` for the Windows host shell:
@@ -450,15 +450,17 @@ async function waitSettled(proc, deadline) {
 }
 
 /**
- * The exec_command model-facing description (shell_spec.rs, win32 form
- * with the Windows safety rules).
+ * The exec_command model-facing description.
+ *
+ * Intentionally NOT the official shell_spec.rs win32 text: its "Windows
+ * safety rules" paragraph presumes a PowerShell host and misleads the model
+ * on this deployment, whose only shell is git bash (repro 2026-09-03:
+ * gpt-5.6 sent shell:"powershell.exe" and every call was rejected).
  */
 const EXEC_COMMAND_DESCRIPTION =
   'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n' +
-  'Windows safety rules:\n' +
-  '- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.\n' +
-  '- Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.\n' +
-  '- When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control.'
+  'This deployment provides exactly one shell: git bash. Write POSIX bash syntax; ' +
+  'only the `shell` values listed in the shell parameter are accepted.'
 
 /** The exec output schema shared by both tools (shell_spec.rs unified_exec_output_schema). */
 const execOutputSchema = {
@@ -540,7 +542,12 @@ function registerExecCommand(ctx, config) {
         type: 'number',
         description: 'Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.',
       },
-      shell: { type: 'string', description: 'Shell binary to launch. Defaults to the user\'s default shell.' },
+      shell: {
+        type: 'string',
+        description:
+          'Shell to use; this deployment only provides git bash, so only these values are accepted: ' +
+          [...SHELL_VALUES].join(', ') + '. Omit to use the default.',
+      },
       login: { type: 'boolean', description: 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.' },
     },
     output: {
