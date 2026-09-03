@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 
 const baseUrl = new URL('./', import.meta.url)
 const rows = [
-  '../../plugins/tools/exec-command.js?v=10',
+  '../../plugins/tools/exec-command.js?v=11',
   '../../plugins/tools/apply-patch.js?v=3',
   '../../plugins/tools/view-image.js?v=1',
   '../../plugins/tools/restrict.js?v=1',

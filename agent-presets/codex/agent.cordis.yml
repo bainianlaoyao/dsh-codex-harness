@@ -38,7 +38,7 @@
         timeoutMs: 300000
 
     - id: tool-codex-exec
-      name: '../../plugins/tools/exec-command.js?v=10'
+      name: '../../plugins/tools/exec-command.js?v=11'
       config:
         backendType: shell
 
