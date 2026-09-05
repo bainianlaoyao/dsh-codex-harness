@@ -12,7 +12,8 @@
  *   2. a REAL-DIRECTORY copy of the codex preset at
  *      $DSH_HOME/.agent-presets/replay-codex — dsh-agent-presets discovery
  *      skips junctions (Dirent.isDirectory() is false for them), so the
- *      install.ps1 junction cannot serve as a roster entry;
+ *      live install also copies a real directory rather than a junction.
+ *      This replay copy is a frozen alignment snapshot, not the daily preset;
  *   3. a fresh workspace directory (REPLAY_WS or <out>/ws).
  *
  * Usage: node run-dsh.mjs <trajectory.json> <out-dir>
@@ -30,6 +31,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { publishCodexPreset } from '../../plugins/preset-publisher.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -42,8 +44,16 @@ const PRESET_ID = process.env.REPLAY_PRESET ?? 'replay-codex'
 function syncPreset() {
   const target = join(DSH_HOME, '.agent-presets', PRESET_ID)
   rmSync(target, { recursive: true, force: true })
-  mkdirSync(target, { recursive: true })
-  cpSync(PRESET_SRC, target, { recursive: true, force: true })
+  publishCodexPreset({ sourceDir: PRESET_SRC, targetDir: target })
+  // Keep the frozen snapshot labelled as a replay copy so the daily picker
+  // does not present it as "codex 工具模式". Relabel after publish so the
+  // publisher's "codex 工具模式" adoption heuristic does not reclaim it.
+  writeFileSync(join(target, 'preset.yml'), [
+    'name: codex 模式（replay 历史快照）',
+    'description: 与 codex 工具模式同内容的独立副本，供 alignment/replay 冻结对照使用；不是日常编码预设。',
+    'order: 5',
+    '',
+  ].join('\n'), { encoding: 'utf8' })
   return target
 }
 

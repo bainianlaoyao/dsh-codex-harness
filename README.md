@@ -18,21 +18,24 @@ DSH 原生实现；不会注入 Codex 格式的 `<environment_context>` 或
 
 ## 安装
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```sh
+dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
+# 或发布后：
+# dsh plugin --profile web add dsh-codex-mode
 ```
 
-重启 DSH 后，新会话选择 **codex 工具模式**。`openai-responses` 路由可将 `apply_patch` 作为自由格式 custom tool；Chat Completions 路由则将它作为普通函数调用。
+重启 DSH 后，host 行 `codex-preset-publisher` 会把包内 `agent-presets/codex`
+**自动复制**到 `$DSH_HOME/.agent-presets/codex`（真实目录，不是 junction）。
+新会话选择 **codex 工具模式**。`openai-responses` 路由可将 `apply_patch`
+作为自由格式 custom tool；Chat Completions 路由则将它作为普通函数调用。
 
-> **已知缺口（2026-09-01）**：`install.ps1` 用目录 junction 挂载
-> `$DSH_HOME\.agent-presets\codex → 本仓库`，而 dsh 的预设发现
-> （`@deepseek-ai/dsh-agent-presets`）不跟随 junction——`readdir` 把 junction
-> 当符号链接跳过，预设会从列表消失（选中旧副本 `replay-codex` 则挂载失败回退
-> 默认）。对策：在 npx-cache 中给 `dsh-agent-presets/lib/index.js` 的
-> `scanRoot` 打追随补丁（`!child.isDirectory() && !child.isSymbolicLink()` 才
-> 跳过），`dsh` 升级后需重打；同时把 `$DSH_HOME\.agent-presets\replay-codex`
-> 的三个文件与 `agent-presets/codex` 同步。详细排查见 `plugins/ACTIVATION.md`
-> §5。
+离线/开发备用：`scripts/install.ps1` 仍可手工复制同一份预设，并保留
+`$DSH_HOME/plugins` junction。日常用户不需要跑它。
+
+> **预设发现**：`dsh-agent-presets` 的 `scanRoot` 跳过 junction / 符号链接。
+> 发布器因此始终写成真实目录。工具行通过 `dsh-codex-mode/plugins/tools/...`
+> 包导出解析，拷贝后的预设不依赖仓库相对路径。`replay-codex` 只是
+> alignment 冻结副本，不是日常编码预设。详细排查见 `plugins/ACTIVATION.md` §5。
 
 ## 验证
 
@@ -40,4 +43,4 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 npm test
 ```
 
-测试覆盖预设模块可加载性、保留工具的行为，以及两个 OpenAI 路由。历史上的完整 Codex 对齐研究保留在 `docs/`，不再是该插件的运行时契约。
+测试覆盖预设模块可加载性、preset 自动发布、保留工具的行为，以及两个 OpenAI 路由。历史上的完整 Codex 对齐研究保留在 `docs/`，不再是该插件的运行时契约。

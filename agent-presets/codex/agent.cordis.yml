@@ -21,7 +21,7 @@
 # The host composition may expose a global bash tool. Keep the preset's
 # terminal surface limited to exec_command/write_stdin where possible.
 - id: tool-codex-restrict
-  name: '../../plugins/tools/restrict.js?v=1'
+  name: 'dsh-codex-mode/plugins/tools/restrict.js'
 
 - id: exec-terminals
   name: cordis:group
@@ -38,15 +38,15 @@
         timeoutMs: 300000
 
     - id: tool-codex-exec
-      name: '../../plugins/tools/exec-command.js?v=11'
+      name: 'dsh-codex-mode/plugins/tools/exec-command.js'
       config:
         backendType: shell
 
 - id: tool-codex-apply-patch
-  name: '../../plugins/tools/apply-patch.js?v=3'
+  name: 'dsh-codex-mode/plugins/tools/apply-patch.js'
 
 - id: tool-codex-view-image
-  name: '../../plugins/tools/view-image.js?v=1'
+  name: 'dsh-codex-mode/plugins/tools/view-image.js'
 
 # ── DSH-native collaboration tools ───────────────────────────────────────────
 # plan / ask-user / delegation are DSH NATIVE tools. The web surface disables

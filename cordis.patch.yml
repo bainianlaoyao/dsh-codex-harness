@@ -11,9 +11,11 @@
 #   # or, for local development:
 #   dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
 #
-# The AGENT PRESET (agent-presets/codex) is NOT a bundle artifact — bundles
-# distribute composition rows only. Deploy it with scripts/install.ps1
-# (creates junctions) or copy agent-presets/codex into $DSH_HOME/.agent-presets/.
+# Installing this bundle also publishes the AGENT PRESET: the
+# `codex-preset-publisher` host row copies agent-presets/codex into
+# $DSH_HOME/.agent-presets/codex as a real directory (junctions are
+# invisible to scanRoot). Tool rows in that preset resolve through this
+# package's exports, so a marketplace install does not need install.ps1.
 #
 # NOTE: `name` resolves as a module specifier; when installed as a package the
 # rows below resolve `./plugins/...` relative to this bundle. Verify with
@@ -22,13 +24,16 @@
 # avoid duplicate route registration).
 - insert:
     - id: llm-openai
-      name: './plugins/llm-openai.js?v=1'
+      name: './plugins/llm-openai.js'
       config:
         apiKeyEnv: OPENAI_API_KEY
         baseURL: 'https://api.openai.com/v1'
 
     - id: llm-responses
-      name: './plugins/llm-responses.js?v=1'
+      name: './plugins/llm-responses.js'
       config:
         apiKeyEnv: OPENAI_API_KEY
         baseURL: 'https://api.openai.com/v1'
+
+    - id: codex-preset-publisher
+      name: './plugins/preset-publisher.js'

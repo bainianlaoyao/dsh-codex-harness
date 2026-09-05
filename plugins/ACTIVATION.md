@@ -14,7 +14,9 @@ Codex 上下文片段（`<environment_context>`、`<current_time_reminder>` 等�
 ## 0. 前置事实
 
 - 模块冒烟 + 预设行解析校验全部通过（`npm test`）。
-- 激活需要重启 dsh（profile 补丁层与预设发现在启动时生效）。
+- 激活需要重启 dsh（profile 补丁层与预设发现在启动时生效）。`dsh plugin add`
+  会挂上 `codex-preset-publisher`，启动时自动把 `codex` 预设写进
+  `$DSH_HOME/.agent-presets/codex`。
 
 ## 1. 提供 OpenAI 凭据（二选一）
 
@@ -56,10 +58,11 @@ dsh web
 
 | 症状 | 原因 | 对策 |
 |------|------|------|
-| 预设列表里看不到 **codex 工具模式**，或选中后自动切回默认预设 | ① dsh 预设发现不跟随目录 junction：`$DSH_HOME\.agent-presets\codex` 是 junction，`readdir` 把它当符号链接跳过（dsh-agent-presets 已知缺口，2026-09-01 已在 npx-cache 打追随补丁；dsh 升级会覆盖，需重打，见仓库 README）；② `$DSH_HOME\.agent-presets\replay-codex` 若是旧副本（引用已删除工具文件）会挂载失败 | 重启 dsh 前确认：npx-cache 发现补丁已重打；`replay-codex` 三个文件与 `agent-presets/codex` 同步（cp 即可） |
+| 预设列表里看不到 **codex 工具模式**，只剩 **codex 模式（replay 历史快照）** | ① 只装了旧版插件、没有 publisher 行；② `scanRoot` 跳过 junction | `dsh plugin add` 后重启；确认 `$DSH_HOME\.agent-presets\codex` 是真实目录且含 `.dsh-codex-mode-published` |
+| `/compact` 不可用 / 长对话不压缩 | web 表面禁用 host 压缩行，旧 `replay-codex` 副本又没带 preset 内 compaction 组 | 日常会话选 **codex 工具模式**（真实目录副本含 compaction 组）；不要用 replay 快照编码 |
 | 模型列表没有 `openai-official` / `openai-responses` | profile 补丁层未生效（未重启） | 重启 dsh；`--dump-config` 验证行存在 |
 | 会话报 `no API key for provider route "..."` | 凭据未提供 | §1 |
-| 预设挂载失败：`Cannot find package` 于 `../../plugins/...` | 路径基准变化 | 行内路径以预设目录为基准（`new URL(name, baseUrl)`）；确认 `C:\Users\30280\.dsh\plugins\tools\` 下文件存在 |
+| 预设挂载失败：`Cannot find package` 于 `dsh-codex-mode/plugins/...` | 源仓库里的包导出名还没被 publisher 改写成 `file:` URL | 重启 dsh 让 `codex-preset-publisher` 跑一次；live 副本的工具行应是 `file:///.../plugins/tools/*.js` |
 | exec_command 报 backend 不存在 | `dsh-terminal-bash` 未注册 `shell` 类型 | 预设 `exec-terminals` 组应含 pty+terminal-bash 两行；检查启动日志 |
 | exec_command 报 NO_BACKEND / 挂起 | git bash 不可用 | 确认 PATH 有 `bash`（git bash）；本机 DSH 全局配置就是 git bash |
 | exec_command 报 `unsupported shell "..."` | 模型传了 bash/shell/git-bash 以外的 shell 值 | 该部署只有 git bash；`/bin/sh`、`/bin/bash` 已作为别名接受，其余值需让模型用 bash/shell/git-bash |
