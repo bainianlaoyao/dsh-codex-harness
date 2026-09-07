@@ -8,8 +8,8 @@ Codex 形状工具只保留 `exec_command`/`write_stdin`/`apply_patch`/`view_ima
 | --- | --- |
 | `llm-openai.js` | OpenAI Chat Completions 路由 |
 | `llm-responses.js` | OpenAI Responses API 路由与 `apply_patch` custom tool 支持 |
-| `tools/exec-command.js` | Codex 风格命令执行和轮询，运行在 DSH shell seam 上 |
-| `tools/apply-patch.js` | 自由格式补丁编辑 |
+| `tools/exec-command.js` | Codex 风格命令执行和轮询；拦截整条 `apply_patch` heredoc/argv；失败消息截到 900 字节 |
+| `tools/apply-patch.js` | 自由格式补丁编辑；unsandboxed 时拒绝跟随 symlink |
 | `tools/view-image.js` | 本地图片查看 |
 | `tools/restrict.js` | 隐藏与 `exec_command` 重复的宿主 shell 工具 |
 | `tools/share-cordis-inspect.js` | 让 Host inspect provider 注册幂等，避免第二份创造预设再挂 `tool-cordis` 时撞 `Service` |

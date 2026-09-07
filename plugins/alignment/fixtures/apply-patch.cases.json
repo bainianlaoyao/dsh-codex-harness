@@ -1,7 +1,7 @@
 {
   "meta": {
     "kind": "apply_patch input/output",
-    "source": "codex HEAD 5bc8da6d78",
+    "source": "codex rust-v0.153.4 (parser/print_summary unchanged from HEAD 5bc8da6d78; no-follow covered in apply-patch.smoke.js)",
     "module": "codex-rs/core/tests/suite/apply_patch_cli.rs",
     "function": "TestCodex apply_patch CLI harness + apply-patch/src/lib.rs print_summary (764-780)",
     "extracted": "2026-08-15",

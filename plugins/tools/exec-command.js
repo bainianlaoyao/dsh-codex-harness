@@ -14,7 +14,9 @@
  *   output).
  * - result text: "Chunk ID: {id}" → "Wall time: {x:.4} seconds" →
  *   "Process exited with code N" → "Process running with session ID N" →
- *   "Original token count: N" → "Output:" → body (context.rs:442-468).
+ *   "Original token count: N" → "Output:" → body (context.rs response_header
+ *   + response_text as of rust-v0.153.4; body is re-truncated so header+body
+ *   fit truncation_policy * 1.2).
  * - truncation: 1 MiB collection cap with head/tail retention and the
  *   "... N bytes omitted ..." marker (head_tail_buffer.rs), then middle
  *   truncation to the token budget with "…N tokens truncated…" and the
@@ -31,6 +33,9 @@
  *   non-empty chars are an error with the official message "write_stdin
  *   failed: stdin is closed for this session; rerun exec_command with
  *   tty=true to keep stdin open" (errors.rs StdinClosed).
+ * - exec_command intercepts whole-command apply_patch argv/heredoc forms and
+ *   runs them through apply_patch (maybe_parse_apply_patch); failures are
+ *   "exec_command failed: {err}" truncated to 900 bytes (truncate_middle_chars).
  *
  * @module dsh-codex/tools/exec-command
  */
@@ -40,9 +45,14 @@ import z from '@deepseek-ai/schemastery'
 import { statSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { omitBlank } from './echo-noise.js?v=2'
+import { applyPatchText, formatApplyPatchOutput, parsePatch } from './apply-patch.js'
 
 export const name = 'tool-codex-exec'
-export const inject = ['tools', 'shell']
+export const inject = ['tools', 'shell', 'fs']
+
+const APPLY_PATCH_IMPLICIT_MESSAGE =
+  'patch detected without explicit call to apply_patch. Rerun as ["apply_patch", "<patch>"]'
+const EXEC_COMMAND_REJECTION_MAX_BYTES = 900
 
 const MAX_SESSIONS_PER_OWNER = 64 // codex MAX_UNIFIED_EXEC_PROCESSES
 const MIN_YIELD_TIME_MS = 250
@@ -88,6 +98,56 @@ export function normalizeWorkdir(value, sessionCwd) {
   }
   if (!isAbsolute(path)) path = resolvePath(sessionCwd, path)
   return path
+}
+
+/**
+ * Detect an `apply_patch` invocation embedded in `exec_command.cmd`.
+ * Conservative port of maybe_parse_apply_patch (invocation.rs): only the
+ * whole-command forms Codex intercepts — a quoted/unquoted argv body, or a
+ * single-statement heredoc (`apply_patch <<EOF` / `cd <path> && apply_patch <<EOF`).
+ * Trailing/leading extra commands do not match.
+ *
+ * @returns {{ kind: 'none' } | { kind: 'implicit' } | { kind: 'body', patch: string, workdir?: string }}
+ */
+export function parseEmbeddedApplyPatch(cmd) {
+  if (typeof cmd !== 'string' || cmd.trim().length === 0) return { kind: 'none' }
+  const text = cmd.replace(/\r\n/g, '\n').trim()
+  try {
+    parsePatch(text)
+    return { kind: 'implicit' }
+  } catch {
+    // Not a raw patch body.
+  }
+
+  const quoted = /^(apply_patch|applypatch)\s+(['"])([\s\S]*)\2\s*$/.exec(text)
+  if (quoted) return { kind: 'body', patch: quoted[3] }
+
+  const unquoted = /^(apply_patch|applypatch)\s+([\s\S]+)$/.exec(text)
+  if (unquoted && !unquoted[2].startsWith('<<')) {
+    try {
+      parsePatch(unquoted[2])
+      return { kind: 'body', patch: unquoted[2] }
+    } catch {
+      // Fall through to heredoc / none.
+    }
+  }
+
+  const heredoc =
+    /^(?:cd\s+(?<cd>(?:'[^']+'|"[^"]+"|\S+))\s*&&\s*)?(?:apply_patch|applypatch)\s*<<[-]?(?<q>['"]?)(?<tag>\w+)\k<q>\n(?<body>[\s\S]*?)\n\k<tag>\s*$/.exec(
+      text
+    )
+  if (heredoc) {
+    const rawCd = heredoc.groups.cd
+    const workdir = rawCd === undefined ? undefined : rawCd.replace(/^(['"])(.*)\1$/, '$2')
+    return workdir === undefined ? { kind: 'body', patch: heredoc.groups.body } : { kind: 'body', patch: heredoc.groups.body, workdir }
+  }
+  return { kind: 'none' }
+}
+
+/** Format an exec_command rejection the way Codex does as of rust-v0.153.4. */
+export function formatExecCommandFailure(err) {
+  const detail = err instanceof Error ? err.message : String(err)
+  return `exec_command failed: ${truncateMiddle(detail, EXEC_COMMAND_REJECTION_MAX_BYTES, false)}`
 }
 
 /**
@@ -287,12 +347,12 @@ export function truncatedOutputBody(value) {
 }
 
 /**
- * Render the codex-parity tool result text — response_text()
- * (core/src/tools/context.rs:442-468): Chunk ID → Wall time (4 decimals)
- * → Process exited with code → Process running with session ID →
- * Original token count → "Output:" → body.
+ * Render the metadata header of an exec result — response_header()
+ * (core/src/tools/context.rs as of rust-v0.153.4): Chunk ID → Wall time
+ * (4 decimals) → Process exited with code → Process running with session ID
+ * → Original token count → "Output:".
  */
-export function renderExecResult(value) {
+export function renderExecHeader(value) {
   const sections = []
   if (typeof value.chunk_id === "string" && value.chunk_id !== "") {
     sections.push(`Chunk ID: ${value.chunk_id}`)
@@ -308,8 +368,36 @@ export function renderExecResult(value) {
     sections.push(`Original token count: ${value.original_token_count}`)
   }
   sections.push('Output:')
-  sections.push(truncatedOutputBody(value))
-  return sections.join("\n")
+  return sections.join('\n')
+}
+
+/**
+ * Render the codex-parity tool result text — response_text() as of
+ * rust-v0.153.4: header, then a body truncated so header + body fit
+ * `truncation_policy * 1.2` (minus header length and the joining newline).
+ */
+export function renderExecResult(value) {
+  const header = renderExecHeader(value)
+  const serializationTokens = value.serialization_max_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const outputBudget = Math.max(
+    0,
+    approxBytesForTokens(Math.ceil(serializationTokens * 1.2)) - Buffer.byteLength(header, 'utf8') - 1
+  )
+  const requested = value.model_output_max_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  let policyTokens = Math.min(requested, serializationTokens)
+  const bodyFor = (tokens) =>
+    truncatedOutputBody({
+      ...value,
+      model_output_max_tokens: tokens,
+      truncated: value.truncated || Buffer.byteLength(value.output ?? '', 'utf8') > approxBytesForTokens(tokens),
+    })
+  let output = bodyFor(policyTokens)
+  while (Buffer.byteLength(output, 'utf8') > outputBudget && policyTokens > 0) {
+    const excessBytes = Buffer.byteLength(output, 'utf8') - outputBudget
+    policyTokens = Math.max(0, policyTokens - approxTokensFromBytes(excessBytes))
+    output = bodyFor(policyTokens)
+  }
+  return `${header}\n${output}`
 }
 
 function generateChunkId() {
@@ -567,10 +655,32 @@ function registerExecCommand(ctx, config) {
       const floor = config.yieldFloorMs ?? (process.platform === 'win32' ? WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS : MIN_YIELD_TIME_MS)
       const yieldMs = clamp(args.yield_time_ms, floor, MAX_YIELD_TIME_MS, DEFAULT_YIELD_TIME_MS)
       const maxTokens = resolveModelOutputMaxTokens(args, config)
-      const cwd = resolveWorkdir(args.workdir, owner.session.header.cwd) ?? owner.session.header.cwd
+      const sessionCwd = owner.session.header.cwd
+      const embedded = parseEmbeddedApplyPatch(args.cmd)
+      if (embedded.kind === 'implicit') throw new Error(APPLY_PATCH_IMPLICIT_MESSAGE)
+      if (embedded.kind === 'body') {
+        const patchCwd = embedded.workdir
+          ? (normalizeWorkdir(embedded.workdir, sessionCwd) ?? sessionCwd)
+          : (normalizeWorkdir(args.workdir, sessionCwd) ?? sessionCwd)
+        const applied = await applyPatchText(ctx, embedded.patch, patchCwd)
+        return compact({
+          chunk_id: '',
+          wall_time_seconds: 0,
+          output: formatApplyPatchOutput(applied),
+          truncated: false,
+          model_output_max_tokens: maxTokens,
+        })
+      }
+
+      const cwd = resolveWorkdir(args.workdir, sessionCwd) ?? sessionCwd
       const start = Date.now()
 
-      const proc = startShell(ctx, exec, args.cmd, cwd)
+      let proc
+      try {
+        proc = startShell(ctx, exec, args.cmd, cwd)
+      } catch (error) {
+        throw new Error(formatExecCommandFailure(error))
+      }
       const onAbort = () => {
         if (!settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
       }

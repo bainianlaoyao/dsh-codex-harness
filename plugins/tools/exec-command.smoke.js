@@ -13,7 +13,8 @@
  * - session ids random in 1000..100000; 64-process cap evicts LRU instead
  *   of failing,
  * - result text: Chunk ID → Wall time → Process exited → Process running →
- *   Original token count → Output: → body (context.rs:442-468).
+ *   Original token count → Output: → body (context.rs response_text as of
+ *   rust-v0.153.4, including header budget).
  *
  * Usage: node tools/exec-command.smoke.js
  */
@@ -71,8 +72,74 @@ function scriptFor(command) {
 
 const captured = []
 const started = []
+const files = new Map()
+const dirs = new Set(['C:/work'])
+function normJoin(base, p) {
+  const isAbs = /^[A-Za-z]:/.test(p) || p.startsWith('/')
+  const raw = isAbs ? p : `${base}/${p}`
+  const parts = []
+  for (const seg of raw.replace(/\\/g, '/').split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(seg)
+  }
+  return parts.join('/')
+}
+const mockFs = {
+  async resolve(path, opts = {}) {
+    const abs = normJoin(opts.cwd ?? 'C:/work', path)
+    return { targetKey: abs, displayPath: abs }
+  },
+  async lstat(path, opts = {}) {
+    const abs = normJoin(opts.cwd ?? 'C:/work', path)
+    if (files.has(abs)) return { version: 'v1', type: 'file', size: files.get(abs).length }
+    if (dirs.has(abs)) return { version: 'v1', type: 'directory', size: 0 }
+    return undefined
+  },
+  async stat(target) {
+    if (files.has(target.targetKey)) return { version: 'v1', type: 'file', size: files.get(target.targetKey).length }
+    if (dirs.has(target.targetKey)) return { version: 'v1', type: 'directory', size: 0 }
+    return undefined
+  },
+  async readText(target) {
+    if (!files.has(target.targetKey)) {
+      const error = new Error(`file not found: ${target.displayPath}`)
+      error.code = 'ENOENT'
+      throw error
+    }
+    return files.get(target.targetKey)
+  },
+  async writeText(target, content) {
+    files.set(target.targetKey, content)
+    const parts = target.targetKey.replace(/\\/g, '/').split('/')
+    parts.pop()
+    const parent = parts.join('/')
+    if (parent.length > 0) dirs.add(parent)
+    return { operation: 'update', version: 'v2', before: null, after: content }
+  },
+  async mkdir(target) {
+    const raw = target.targetKey.replace(/\\/g, '/')
+    const parts = []
+    for (const seg of raw.split('/')) {
+      if (seg === '' || seg === '.') continue
+      parts.push(seg)
+      dirs.add(parts.join('/'))
+    }
+  },
+  processPath(target) {
+    return target.targetKey
+  },
+  contains(parent, child) {
+    const p = parent.targetKey.replace(/\/+$/, '')
+    return child.targetKey === p || child.targetKey.startsWith(`${p}/`)
+  },
+}
 const ctx = {
   tools: { register: (definition) => captured.push(definition) },
+  fs: mockFs,
   get(service) {
     if (service === 'shellEnv') return { collect: () => ({ DSH_TEST: '1' }) }
     return undefined
@@ -83,12 +150,18 @@ const ctx = {
     },
     start(resolved) {
       started.push(resolved)
+      if (resolved.command.includes('explode-long')) {
+        throw new Error(`boom ${'x'.repeat(2000)}`)
+      }
+      if (resolved.command.includes('explode-short')) {
+        throw new Error('nope')
+      }
       return new FakeProc(resolved, scriptFor(resolved.command))
     },
   },
 }
 
-const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult, SHELL_VALUES } = await import('./exec-command.js')
+const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult, truncatedOutputBody, formatExecCommandFailure, SHELL_VALUES } = await import('./exec-command.js')
 apply(ctx, { maxOutputBytes: 100000, yieldFloorMs: 250 })
 
 const execCommand = captured.find((t) => t.name === 'exec_command')
@@ -273,5 +346,118 @@ for (const key of ['chunk_id', 'wall_time_seconds', 'exit_code', 'session_id', '
   assert.ok(outProps[key] !== undefined, 'output schema has ' + key)
 assert.ok((execCommand.output.schema.required ?? []).includes('wall_time_seconds'), 'wall_time_seconds required')
 assert.ok((execCommand.output.schema.required ?? []).includes('output'), 'output required')
+
+// ── intercept: heredoc apply_patch never reaches the shell ─────────────────
+const startedBeforeIntercept = started.length
+const heredocCmd = [
+  "apply_patch <<'EOF'",
+  '*** Begin Patch',
+  '*** Add File: intercepted.txt',
+  '+hello',
+  '*** End Patch',
+  'EOF',
+].join('\n')
+const intercepted = await run(execCommand, { cmd: heredocCmd })
+assert.equal(started.length, startedBeforeIntercept, 'heredoc apply_patch must not start a shell process')
+assert.ok(intercepted.output.includes('A intercepted.txt'), 'intercepted heredoc applies the patch')
+assert.equal(files.get('C:/work/intercepted.txt'), 'hello\n', 'intercepted heredoc wrote the file')
+assert.equal(intercepted.session_id, undefined, 'intercepted apply_patch is not a resumable session')
+assert.equal(intercepted.exit_code, undefined, 'intercepted apply_patch omits exec exit_code (codex process_id/exit_code None)')
+
+const aliasCmd = [
+  'applypatch <<EOF',
+  '*** Begin Patch',
+  '*** Add File: alias.txt',
+  '+alias',
+  '*** End Patch',
+  'EOF',
+].join('\n')
+await run(execCommand, { cmd: aliasCmd })
+assert.equal(files.get('C:/work/alias.txt'), 'alias\n', 'applypatch alias is intercepted')
+
+const quotedBody = await run(execCommand, {
+  cmd: "apply_patch '*** Begin Patch\n*** Add File: quoted.txt\n+quoted\n*** End Patch'",
+})
+assert.equal(files.get('C:/work/quoted.txt'), 'quoted\n', 'quoted apply_patch body is intercepted')
+assert.equal(started.length, startedBeforeIntercept, 'quoted apply_patch must not start a shell process')
+
+dirs.add('C:/work/sub')
+const cdHeredoc = [
+  "cd sub && apply_patch <<'EOF'",
+  '*** Begin Patch',
+  '*** Add File: nested.txt',
+  '+nested',
+  '*** End Patch',
+  'EOF',
+].join('\n')
+await run(execCommand, { cmd: cdHeredoc })
+assert.equal(files.get('C:/work/sub/nested.txt'), 'nested\n', 'cd && apply_patch heredoc uses the cd path as cwd')
+
+const extra = await run(execCommand, {
+  cmd: [
+    "apply_patch <<'EOF'",
+    '*** Begin Patch',
+    '*** Add File: extra.txt',
+    '+nope',
+    '*** End Patch',
+    'EOF',
+    '&& echo done',
+  ].join('\n'),
+})
+assert.equal(started.length, startedBeforeIntercept + 1, 'trailing commands prevent intercept and run in the shell')
+assert.equal(files.has('C:/work/extra.txt'), false, 'non-intercepted heredoc with extra commands does not apply')
+assert.ok(extra.output.includes('hi'), 'non-intercepted command still runs through the fake shell')
+
+const implicit = await run(execCommand, {
+  cmd: '*** Begin Patch\n*** Add File: implicit.txt\n+x\n*** End Patch',
+}).catch((error) => error)
+assert.ok(implicit instanceof Error, 'raw patch body is not silently applied')
+assert.equal(
+  implicit.message,
+  'patch detected without explicit call to apply_patch. Rerun as ["apply_patch", "<patch>"]',
+  'implicit invocation uses the official message'
+)
+assert.equal(files.has('C:/work/implicit.txt'), false, 'implicit patch does not write')
+assert.equal(started.length, startedBeforeIntercept + 1, 'implicit patch does not start a shell')
+
+// ── exec_command failure: prefix + 900-byte middle truncation, no cmd echo ─
+const shortFail = await run(execCommand, { cmd: 'explode-short' }).catch((error) => error)
+assert.ok(shortFail instanceof Error, 'short spawn failure is an error')
+assert.equal(shortFail.message, 'exec_command failed: nope', 'short failure uses the official prefix and omits the cmd')
+assert.ok(!shortFail.message.includes('explode-short'), 'failure message does not echo cmd')
+
+const longFail = await run(execCommand, { cmd: 'explode-long' }).catch((error) => error)
+assert.ok(longFail instanceof Error, 'long spawn failure is an error')
+assert.ok(longFail.message.startsWith('exec_command failed: '), 'long failure keeps the official prefix')
+assert.ok(/…\d+ chars truncated…/.test(longFail.message), 'long failure is middle-truncated with a char marker')
+assert.ok(!longFail.message.includes('explode-long'), 'truncated failure does not echo cmd')
+assert.equal(
+  formatExecCommandFailure(new Error('nope')),
+  'exec_command failed: nope',
+  'formatExecCommandFailure is a no-op under the 900-byte budget'
+)
+
+// ── response_text header budget: shrink body so header+body fit 1.2× policy ─
+const headerBudgetBody = `${'abcdefghij\n'.repeat(40)}`
+const headerBudgetValue = {
+  chunk_id: '00ff00',
+  exit_code: 0,
+  wall_time_seconds: 1.25,
+  output: headerBudgetBody,
+  truncated: true,
+  original_token_count: 110,
+  model_output_max_tokens: 80,
+  serialization_max_tokens: 50,
+}
+const headerBudgetText = renderExecResult(headerBudgetValue)
+const header = headerBudgetText.slice(0, headerBudgetText.indexOf('\nOutput:') + '\nOutput:'.length)
+const body = headerBudgetText.slice(header.length + 1)
+const serializationBudget = Math.ceil(50 * 1.2) * 4
+assert.ok(Buffer.byteLength(body, 'utf8') <= serializationBudget - Buffer.byteLength(header, 'utf8') - 1, 'body reserved room for the header under 1.2× serialization policy')
+assert.ok(body.includes('tokens truncated') || body.includes('Warning: truncated output'), 'header-budget shrink still reports truncation')
+assert.ok(
+  Buffer.byteLength(truncatedOutputBody(headerBudgetValue), 'utf8') > Buffer.byteLength(body, 'utf8'),
+  'header budget shrinks a body that already fit the model token cap',
+)
 
 console.log('exec-command smoke test: ALL PASS')

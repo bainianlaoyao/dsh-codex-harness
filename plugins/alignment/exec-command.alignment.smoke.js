@@ -1,11 +1,13 @@
 /**
  * Alignment test: exec_command result text vs codex official HEAD format.
  *
- * Reads fixtures/extracted from codex ExecCommandToolOutput::response_text()
- * (core/src/tools/context.rs:442-468) and asserts tools/exec-command.js
- * renderExecResult reproduces the byte shape (section order, 4-decimal wall
- * time, `Output:` label, truncation prefix, no exit-code section on signal
- * death).
+ * Reads fixtures extracted from codex ExecCommandToolOutput::response_text()
+ * (core/src/tools/context.rs as of rust-v0.153.4) and asserts
+ * tools/exec-command.js renderExecResult reproduces the byte shape (section
+ * order, 4-decimal wall time, `Output:` label, truncation prefix, no
+ * exit-code section on signal death). Short-output cases are unchanged from
+ * the 5bc8da6d78 freeze; header-budget shrinking is covered in
+ * exec-command.smoke.js.
  *
  * Usage: node dsh-codex/alignment/exec-command.alignment.smoke.js
  *        (from the profile root)

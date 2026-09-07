@@ -48,6 +48,12 @@ function makeFs(seed) {
       const abs = norm(opts.cwd ?? 'C:/tmp', path)
       return { targetKey: abs, displayPath: abs }
     },
+    async lstat(path, opts = {}) {
+      const abs = norm(opts.cwd ?? 'C:/tmp', path)
+      if (files.has(abs)) return { version: 'v1', type: 'file', size: files.get(abs).length }
+      if (dirs.has(abs)) return { version: 'v1', type: 'directory', size: 0 }
+      return undefined
+    },
     async stat(target) {
       if (files.has(target.targetKey)) return { version: 'v1', type: 'file', size: files.get(target.targetKey).length }
       if (dirs.has(target.targetKey)) return { version: 'v1', type: 'directory', size: 0 }

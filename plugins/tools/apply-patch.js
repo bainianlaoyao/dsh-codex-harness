@@ -1,7 +1,7 @@
 /**
  * dsh-codex M1 — `apply_patch` freeform file editor.
  *
- * Codex-parity patch language (HEAD 5bc8da6d78, apply_patch.lark +
+ * Codex-parity patch language (rust-v0.153.4, apply_patch.lark +
  * codex-rs/apply-patch/src/{parser,streaming_parser,file_update,seek_sequence,
  * invocation,lib}.rs) re-implemented in JS over the DSH `ctx.fs` seam:
  * Add/Update/Delete/Move hunks with @@-separated chunks, context/old-line
@@ -25,6 +25,8 @@
  *   print_summary "Success. Updated the following files:" + A/M/D lines
  *   grouped added → modified → deleted (lib.rs print_summary + tools/mod.rs
  *   format_exec_output_for_model: wall time rounded to 1 decimal).
+ * - unsandboxed apply (this deployment) rejects symlink leaves and ancestors
+ *   via ctx.fs.lstat (`follow_symlinks: false`, Codex #39659).
  *
  * @module dsh-codex/tools/apply-patch
  */
@@ -58,7 +60,7 @@ const patchErr = (message) => new Error(`invalid patch: ${message}`)
  * (streaming_parser.rs:84-101): at most once, non-empty.
  * @returns {{ hunks: object[], environmentId: string|null }}
  */
-function parsePatch(patchText) {
+export function parsePatch(patchText) {
   let lines = patchText.trim().split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
   const first = lines[0]?.trim()
   const last = lines[lines.length - 1]?.trim()
@@ -273,6 +275,60 @@ function assertContained(ctx, cwdTarget, target, patchPath) {
   }
 }
 
+/**
+ * Prefixes of a patch path, from the first component to the full path.
+ * Used with `lstat` so ancestor and leaf symlinks are both visible
+ * (DSH `lstat` does not follow only the final component).
+ */
+export function pathPrefixes(patchPath) {
+  if (typeof patchPath !== 'string' || patchPath.trim().length === 0) return []
+  const unix = patchPath.replace(/\\/g, '/')
+  const parts = unix.split('/')
+  const out = []
+  let acc = ''
+  for (let i = 0; i < parts.length; i++) {
+    const seg = parts[i]
+    if (seg === '.' || (seg === '' && i !== 0)) continue
+    if (i === 0 && /^[A-Za-z]:$/.test(seg)) {
+      acc = seg
+      continue
+    }
+    if (seg === '' && i === 0) {
+      acc = ''
+      continue
+    }
+    acc = acc === '' ? (unix.startsWith('/') ? `/${seg}` : seg) : `${acc}/${seg}`
+    if (acc === '/' || acc === '') continue
+    out.push(acc)
+  }
+  return out
+}
+
+/**
+ * Codex `#39659` no-follow: reject a patch path when any component is a
+ * symlink. This deployment runs unsandboxed (`danger-full-access`), which
+ * is the Codex path that sets `follow_symlinks: false`.
+ *
+ * Uses `ctx.fs.lstat` (path-shaped, does not follow the final component)
+ * on every prefix so ancestor links are caught too. Absent prefixes are
+ * allowed (Add File into a missing directory).
+ */
+async function assertNoSymlinks(ctx, patchPath, cwd) {
+  if (typeof ctx.fs.lstat !== 'function') return
+  for (const prefix of pathPrefixes(patchPath)) {
+    let info
+    try {
+      info = await ctx.fs.lstat(prefix, { cwd })
+    } catch (error) {
+      throw new Error(`${patchPath}: ${ioErrorText(error)}`)
+    }
+    if (info === undefined) continue
+    if (info.type === 'symlink' || info.type === 'other') {
+      throw new Error(`path contains a symbolic link: ${prefix}`)
+    }
+  }
+}
+
 /** Rust io::Error Display for common Node error codes (ENOENT first). */
 function ioErrorText(error) {
   if (error?.code === 'ENOENT') return 'No such file or directory (os error 2)'
@@ -305,12 +361,14 @@ async function verifyHunks(ctx, hunks, cwd) {
   const seen = new Map()
   const ops = []
   for (const hunk of hunks) {
+    await assertNoSymlinks(ctx, hunk.path, cwd)
+    if (hunk.movePath !== null && hunk.movePath !== undefined) await assertNoSymlinks(ctx, hunk.movePath, cwd)
     const { target, displayPath } = await resolveTarget(ctx, hunk.path, cwd)
     const key = displayPath
     if (seen.has(key)) throw new Error(`invalid patch: multiple operations target ${key}`)
     seen.set(key, true)
     if (hunk.kind === "add") {
-      ops.push({ kind: "add", target, displayPath, rawPath: hunk.path, contents: hunk.contents })
+      ops.push({ kind: "add", target, displayPath, rawPath: hunk.path, checkPath: hunk.path, contents: hunk.contents })
       continue
     }
     if (hunk.kind === "delete") {
@@ -322,7 +380,7 @@ async function verifyHunks(ctx, hunks, cwd) {
       } catch (error) {
         throw new Error(`Failed to read ${displayPath}: ${ioErrorText(error)}`)
       }
-      ops.push({ kind: "delete", target, displayPath, rawPath: hunk.path })
+      ops.push({ kind: "delete", target, displayPath, rawPath: hunk.path, checkPath: hunk.path })
       continue
     }
     // update (and move)
@@ -351,9 +409,9 @@ async function verifyHunks(ctx, hunks, cwd) {
         if (seen.has(dest.displayPath)) throw new Error(`invalid patch: multiple operations target ${dest.displayPath}`)
         seen.set(dest.displayPath, true)
       }
-      ops.push({ kind: "update", target, displayPath, rawPath: hunk.movePath, newContent, moveTo: dest })
+      ops.push({ kind: "update", target, displayPath, rawPath: hunk.movePath, checkPath: hunk.path, newContent, moveTo: { ...dest, checkPath: hunk.movePath } })
     } else {
-      ops.push({ kind: "update", target, displayPath, rawPath: hunk.path, newContent })
+      ops.push({ kind: "update", target, displayPath, rawPath: hunk.path, checkPath: hunk.path, newContent })
     }
   }
   return ops
@@ -387,6 +445,8 @@ async function removeTarget(ctx, target) {
 async function applyOps(ctx, ops, cwd) {
   const files = []
   for (const op of ops) {
+    await assertNoSymlinks(ctx, op.checkPath, cwd)
+    if (op.moveTo !== undefined) await assertNoSymlinks(ctx, op.moveTo.checkPath, cwd)
     if (op.kind === "add") {
       await ensureParentDirectory(ctx, op.target, cwd)
       await ctx.fs.writeText(op.target, op.contents.map((line) => `${line}\n`).join(""))
@@ -414,6 +474,57 @@ async function applyOps(ctx, ops, cwd) {
 function formatWallTime(seconds) {
   const rounded = Math.round(seconds * 10) / 10
   return String(rounded)
+}
+
+/** Model-facing apply_patch success text (exec-shell wrapper + print_summary). */
+export function formatApplyPatchOutput(value) {
+  return [
+    'Exit code: 0',
+    `Wall time: ${formatWallTime(value.wall_time_seconds)} seconds`,
+    'Output:',
+    value.summary,
+    ...value.files.map((file) => `${file.action} ${file.path}`),
+  ].join('\n') + '\n'
+}
+
+/**
+ * Parse, verify, and apply a patch against `cwd`. Shared by the `apply_patch`
+ * tool and by `exec_command` interception of an embedded apply_patch invocation.
+ */
+export async function applyPatchText(ctx, patch, cwd) {
+  let parsed
+  try {
+    parsed = parsePatch(patch)
+  } catch (error) {
+    throw new Error(`apply_patch verification failed: ${error.message}`)
+  }
+  // Safety assessment (safety.rs): an empty patch is rejected WITHOUT
+  // the verification prefix.
+  if (parsed.hunks.length === 0) {
+    throw new Error('patch rejected: empty patch')
+  }
+  const start = Date.now()
+  // Verification stage first: any failure leaves the filesystem untouched.
+  let ops, files
+  try {
+    ops = await verifyHunks(ctx, parsed.hunks, cwd)
+  } catch (error) {
+    throw new Error(`apply_patch verification failed: ${error.message}`)
+  }
+  try {
+    files = await applyOps(ctx, ops, cwd)
+  } catch (error) {
+    throw new Error(`apply_patch verification failed: ${error.message}`)
+  }
+  // print_summary groups by action: added → modified → deleted
+  // (apply-patch/src/lib.rs:764-780), stable within each group.
+  const ACTION_ORDER = { A: 0, M: 1, D: 2 }
+  files.sort((a, b) => ACTION_ORDER[a.action] - ACTION_ORDER[b.action])
+  return {
+    summary: 'Success. Updated the following files:',
+    wall_time_seconds: (Date.now() - start) / 1000,
+    files,
+  }
 }
 
 export function apply(ctx) {
@@ -455,18 +566,7 @@ export function apply(ctx) {
         // "Wall time: {1-decimal} seconds" / "Output:") and the summary is
         // print_summary() (apply-patch/src/lib.rs:764-780):
         // "Success. Updated the following files:" + A/M/D lines.
-        render: (_args, value) => [
-          {
-            type: "text",
-            text: [
-              'Exit code: 0',
-              `Wall time: ${formatWallTime(value.wall_time_seconds)} seconds`,
-              'Output:',
-              value.summary,
-              ...value.files.map((file) => `${file.action} ${file.path}`),
-            ].join('\n') + '\n',
-          },
-        ],
+        render: (_args, value) => [{ type: "text", text: formatApplyPatchOutput(value) }],
       },
       async execute(args, exec) {
         if (typeof args.patch !== 'string' || args.patch.trim().length === 0) {
@@ -478,39 +578,7 @@ export function apply(ctx) {
         if (typeof cwd !== 'string' || cwd.length === 0) {
           throw new Error('apply_patch: no working directory on the owning agent session')
         }
-        let parsed
-        try {
-          parsed = parsePatch(args.patch)
-        } catch (error) {
-          throw new Error(`apply_patch verification failed: ${error.message}`)
-        }
-        // Safety assessment (safety.rs): an empty patch is rejected WITHOUT
-        // the verification prefix.
-        if (parsed.hunks.length === 0) {
-          throw new Error('patch rejected: empty patch')
-        }
-        const start = Date.now()
-        // Verification stage first: any failure leaves the filesystem untouched.
-        let ops, files
-        try {
-          ops = await verifyHunks(ctx, parsed.hunks, cwd)
-        } catch (error) {
-          throw new Error(`apply_patch verification failed: ${error.message}`)
-        }
-        try {
-          files = await applyOps(ctx, ops, cwd)
-        } catch (error) {
-          throw new Error(`apply_patch verification failed: ${error.message}`)
-        }
-        // print_summary groups by action: added → modified → deleted
-        // (apply-patch/src/lib.rs:764-780), stable within each group.
-        const ACTION_ORDER = { A: 0, M: 1, D: 2 }
-        files.sort((a, b) => ACTION_ORDER[a.action] - ACTION_ORDER[b.action])
-        return {
-          summary: 'Success. Updated the following files:',
-          wall_time_seconds: (Date.now() - start) / 1000,
-          files,
-        }
+        return applyPatchText(ctx, args.patch, cwd)
       },
       presentCall: (args) => ({ card: 'generic', title: 'Apply patch', kind: 'other', rawInput: args.patch }),
     })

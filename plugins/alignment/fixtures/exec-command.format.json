@@ -1,10 +1,10 @@
 {
   "meta": {
     "kind": "exec_command result text format",
-    "source": "codex HEAD 5bc8da6d78",
+    "source": "codex rust-v0.153.4 (3d2ee51ca2); short-output cases unchanged from HEAD 5bc8da6d78",
     "module": "codex-rs/core/src/tools/context.rs + unified_exec",
-    "function": "ExecCommandToolOutput::response_text() (442-468) + truncated_output() (412-440) + head_tail_buffer + utils/string/truncate.rs",
-    "extracted": "2026-08-15 (re-extracted after SEM-S4/S16/O1-O4 alignment)",
+    "function": "ExecCommandToolOutput::response_text() + truncated_output_with_policy() + head_tail_buffer + utils/string/truncate.rs",
+    "extracted": "2026-09-07 (header-budget response_text; short cases still match freeze-era byte shape)",
     "note": "Section order: Chunk ID (always, 6 hex chars) → Wall time (4 decimals) → Process exited with code (only when exit_code is Some) → Process running with session ID → Original token count (always, Option in the wire but always Some in the real path) → Output: → body. Truncation: token-budget middle truncation with \"…N tokens truncated…\" plus \"Warning: truncated output (original token count: N)\\nTotal output lines: L\\n\\n\" prefix; the 1 MiB collection cap inserts \"... N bytes omitted ...\". DSH counterpart: renderExecResult(value)."
   },
   "cases": [

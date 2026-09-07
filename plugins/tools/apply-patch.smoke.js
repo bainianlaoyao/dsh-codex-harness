@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 const captured = []
 const files = new Map() // absolute-ish path -> content
 const dirs = new Set(['C:/tmp'])
+const links = new Map() // absolute-ish path -> target path (symlink, not followed by lstat)
 
 function normJoin(base, p) {
   const isAbs = /^[A-Za-z]:/.test(p) || p.startsWith('/')
@@ -26,10 +27,27 @@ function normJoin(base, p) {
   return parts.join('/')
 }
 
+function followLinks(abs) {
+  let current = abs
+  const seen = new Set()
+  while (links.has(current) && !seen.has(current)) {
+    seen.add(current)
+    current = links.get(current)
+  }
+  return current
+}
+
 const mockFs = {
   async resolve(path, opts = {}) {
-    const abs = normJoin(opts.cwd ?? 'C:/tmp', path)
+    const abs = followLinks(normJoin(opts.cwd ?? 'C:/tmp', path))
     return { targetKey: abs, displayPath: abs }
+  },
+  async lstat(path, opts = {}) {
+    const abs = normJoin(opts.cwd ?? 'C:/tmp', path)
+    if (links.has(abs)) return { version: 'v1', type: 'symlink', size: 0 }
+    if (files.has(abs)) return { version: 'v1', type: 'file', size: files.get(abs).length }
+    if (dirs.has(abs)) return { version: 'v1', type: 'directory', size: 0 }
+    return undefined
   },
   async stat(target) {
     if (files.has(target.targetKey)) return { version: 'v1', type: 'file', size: files.get(target.targetKey).length }
@@ -236,5 +254,89 @@ await assert.rejects(
   /apply_patch requires an owning agent session/,
   'agent required'
 )
+
+// ── no-follow: leaf symlink is rejected and the victim is untouched ────────
+files.set('C:/tmp/outside/victim.txt', 'original\n')
+dirs.add('C:/tmp/outside')
+links.set('C:/tmp/link.txt', 'C:/tmp/outside/victim.txt')
+await assert.rejects(
+  () => run({ patch: '*** Begin Patch\n*** Update File: link.txt\n@@\n-original\n+changed\n*** End Patch' }),
+  /path contains a symbolic link/,
+  'leaf symlink update rejected'
+)
+assert.equal(files.get('C:/tmp/outside/victim.txt'), 'original\n', 'leaf symlink must not rewrite the victim')
+
+await assert.rejects(
+  () => run({ patch: '*** Begin Patch\n*** Delete File: link.txt\n*** End Patch' }),
+  /path contains a symbolic link/,
+  'leaf symlink delete rejected'
+)
+assert.equal(files.get('C:/tmp/outside/victim.txt'), 'original\n', 'leaf symlink must not delete the victim')
+assert.equal(links.get('C:/tmp/link.txt'), 'C:/tmp/outside/victim.txt', 'leaf symlink itself remains')
+
+// ── no-follow: ancestor directory symlink is rejected ──────────────────────
+links.set('C:/tmp/linked', 'C:/tmp/outside')
+dirs.add('C:/tmp/linked')
+await assert.rejects(
+  () => run({ patch: '*** Begin Patch\n*** Update File: linked/victim.txt\n@@\n-original\n+changed\n*** End Patch' }),
+  /path contains a symbolic link/,
+  'ancestor symlink update rejected'
+)
+assert.equal(files.get('C:/tmp/outside/victim.txt'), 'original\n', 'ancestor symlink must not rewrite the victim')
+
+await assert.rejects(
+  () => run({ patch: '*** Begin Patch\n*** Add File: linked/new/nested.txt\n+changed\n*** End Patch' }),
+  /path contains a symbolic link/,
+  'add under ancestor symlink rejected'
+)
+assert.equal(files.has('C:/tmp/outside/new/nested.txt'), false, 'must not create files through an ancestor symlink')
+
+files.set('C:/tmp/existing.txt', 'old line\n')
+await assert.rejects(
+  () => run({
+    patch: '*** Begin Patch\n*** Update File: existing.txt\n*** Move to: linked/moved.txt\n@@\n-old line\n+changed\n*** End Patch',
+  }),
+  /path contains a symbolic link/,
+  'move destination through ancestor symlink rejected'
+)
+assert.equal(files.get('C:/tmp/existing.txt'), 'old line\n', 'failed move leaves the source untouched')
+
+// ── no-follow: path swapped to a symlink after verification ────────────────
+files.set('C:/tmp/approved/file.txt', 'original\n')
+dirs.add('C:/tmp/approved')
+files.set('C:/tmp/swap-outside/file.txt', 'original\n')
+dirs.add('C:/tmp/swap-outside')
+const originalResolve = mockFs.resolve.bind(mockFs)
+const originalLstat = mockFs.lstat.bind(mockFs)
+let verifiedApproved = false
+mockFs.resolve = async (path, opts = {}) => {
+  const result = await originalResolve(path, opts)
+  if (String(path).includes('approved/file.txt')) verifiedApproved = true
+  return result
+}
+mockFs.lstat = async (path, opts = {}) => {
+  const abs = normJoin(opts.cwd ?? 'C:/tmp', path)
+  if (verifiedApproved && (abs === 'C:/tmp/approved' || abs.endsWith('/approved'))) {
+    return { version: 'v1', type: 'symlink', size: 0 }
+  }
+  return originalLstat(path, opts)
+}
+await assert.rejects(
+  () => run({ patch: '*** Begin Patch\n*** Update File: approved/file.txt\n@@\n-original\n+changed\n*** End Patch' }),
+  /path contains a symbolic link/,
+  'symlink swap after verification is rejected at apply'
+)
+assert.equal(files.get('C:/tmp/approved/file.txt'), 'original\n', 'approved file untouched after swap')
+assert.equal(files.get('C:/tmp/swap-outside/file.txt'), 'original\n', 'outside victim untouched after swap')
+mockFs.resolve = originalResolve
+mockFs.lstat = originalLstat
+
+// ── no-follow: regular files still apply ───────────────────────────────────
+files.set('C:/tmp/regular.txt', 'original\n')
+const regular = await run({
+  patch: '*** Begin Patch\n*** Update File: regular.txt\n@@\n-original\n+changed\n*** End Patch',
+})
+assert.deepEqual(regular.files, [{ path: 'regular.txt', action: 'M' }], 'regular file update still applies')
+assert.equal(files.get('C:/tmp/regular.txt'), 'changed\n', 'regular file content updated')
 
 console.log('apply-patch smoke test: ALL PASS')
