@@ -69,6 +69,7 @@ dsh web
 | exec_command 报 `spawn bash ENOENT` | 模型把 `workdir` 传成了 POSIX/git-bash 路径（`/d/...`）或不存在目录——Windows 上无效 cwd 的 spawn 失败就是这个报错 | 已修复（exec-command.js?v=10）：`/d/...` 自动归一化为 `D:\...`、相对路径按会话 cwd 解析、目录不存在时返回明确错误（`workdir is not an existing directory: ...`）而不是裸 ENOENT；需重启/新建会话加载新模块 |
 | 审批卡片永不出现 | 会话策略 never（本 profile 默认 danger-full-access+never） | DSH 语义下 never 不弹窗；要弹窗请把会话审批策略切到 ask |
 | 长对话不触发压缩 | 未接近上下文窗口 | DSH 原生压缩按宿主阈值触发；超长会话可用 `/compact` 手动压缩 |
+| apply_patch 报 `SetFileSecurityW EACCES (Win32 5): ...\\.*.tmpdir\\*.tmp` | 不是 patch 解析失败。`dsh-fs-local` 在 Windows 上先把原文件 DACL 拷到 staging 再 `ReplaceFileW`；ReFS（以及继承 ACL 只有 `Authenticated Users:(M)` 的 NTFS）没有 WRITE_DAC，拷贝直接被拒。`apply_patch` 把这次**写入**失败也包成 `verification failed` | 确认 profile 补丁含 `win32-atomic-write-fallback` 后**重启 dsh**。该行在 `ctx.fs.internals` 上吞掉 WRITE_DAC 拒绝并改用同卷 `rename`。NTFS 上仍走官方 `ReplaceFileW` |
 | apply_patch 报 parent directory | 父目录为普通文件 | codex 同行为：父路径非目录才报错（目录缺失会自动创建） |
 | 图片模型报不声明 image input | 所选模型 inputModalities 无 image | 换 gpt-5/gpt-4.1 系模型 |
 

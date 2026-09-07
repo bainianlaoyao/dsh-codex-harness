@@ -6,6 +6,7 @@
 
 - `exec_command` / `write_stdin`：DSH shell 适配器，保留长命令轮询和输出截断体验。
 - `apply_patch`：自由格式补丁编辑器；这是首选文件编辑工具。
+- `win32-atomic-write-fallback`：Windows host 行。ReFS / 无 WRITE_DAC 的 ACL 上，官方原子写的 `SetFileSecurityW` 会 EACCES；此行回退到 `rename`，`apply_patch` / `write` / `edit` 才能落盘。
 - `view_image`：本地图片查看。
 - DSH 原生工具：计划 `todo_write`、提问 `ask_user_question`、子代理 `subagent` / `subagent_fork`（+ `send_message` / `interrupt_agent` / `list_agents`）、`web_search`。
 - OpenAI Chat Completions 和 Responses API 路由。

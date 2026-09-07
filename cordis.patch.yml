@@ -37,3 +37,12 @@
 
     - id: codex-preset-publisher
       name: './plugins/preset-publisher.js'
+
+    # Windows atomic writes copy the target DACL then ReplaceFileW. On ReFS
+    # (and NTFS files whose inherited ACL is only Modify, not WRITE_DAC)
+    # that call fails with SetFileSecurityW EACCES (Win32 5) and apply_patch
+    # / write / edit abort even though Node rename can still publish. This
+    # row hooks ctx.fs.internals so a WRITE_DAC refusal falls back to
+    # rename. Bump `?v=` after editing the file under a running dsh.
+    - id: win32-atomic-write-fallback
+      name: './plugins/win32-atomic-write-fallback.js'
