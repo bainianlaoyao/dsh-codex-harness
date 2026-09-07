@@ -323,7 +323,7 @@ async function assertNoSymlinks(ctx, patchPath, cwd) {
       throw new Error(`${patchPath}: ${ioErrorText(error)}`)
     }
     if (info === undefined) continue
-    if (info.type === 'symlink' || info.type === 'other') {
+    if (info.type === 'symlink') {
       throw new Error(`path contains a symbolic link: ${prefix}`)
     }
   }

@@ -161,7 +161,7 @@ const ctx = {
   },
 }
 
-const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult, truncatedOutputBody, formatExecCommandFailure, SHELL_VALUES } = await import('./exec-command.js')
+const { apply, approxTokens, truncateMiddle, formattedTruncateText, renderExecResult, truncatedOutputBody, formatExecCommandFailure, parseEmbeddedApplyPatch, SHELL_VALUES } = await import('./exec-command.js')
 apply(ctx, { maxOutputBytes: 100000, yieldFloorMs: 250 })
 
 const execCommand = captured.find((t) => t.name === 'exec_command')
@@ -237,6 +237,7 @@ if (process.platform === 'win32') {
 const missingPosix = await run(execCommand, { cmd: 'echo hi', workdir: '/d/Data/DEV/does-not-exist-xyz' }).catch((error) => error)
 assert.ok(missingPosix instanceof Error && /workdir is not an existing directory/.test(missingPosix.message), 'nonexistent workdir rejected with a clear message')
 assert.ok(/resolved to [A-Z]:/.test(missingPosix.message), 'clear error mentions the resolved Windows path')
+assert.ok(!missingPosix.message.startsWith('exec_command failed:'), 'workdir preflight stays unwrapped so the model sees the original fix')
 
 const missingWin = await run(execCommand, { cmd: 'echo hi', workdir: 'D:\\Data\\DEV\\does-not-exist-xyz' }).catch((error) => error)
 assert.ok(missingWin instanceof Error && /workdir is not an existing directory/.test(missingWin.message), 'nonexistent Windows workdir also rejected clearly')
@@ -347,6 +348,16 @@ for (const key of ['chunk_id', 'wall_time_seconds', 'exit_code', 'session_id', '
 assert.ok((execCommand.output.schema.required ?? []).includes('wall_time_seconds'), 'wall_time_seconds required')
 assert.ok((execCommand.output.schema.required ?? []).includes('output'), 'output required')
 
+assert.equal(parseEmbeddedApplyPatch('echo hi').kind, 'none', 'ordinary commands are not intercepted')
+assert.equal(parseEmbeddedApplyPatch('apply_patch --help').kind, 'none', 'apply_patch --help is not a patch body')
+assert.equal(parseEmbeddedApplyPatch("apply_patch '--help'").kind, 'none', 'quoted --help is not a patch body')
+assert.equal(parseEmbeddedApplyPatch('apply_patch').kind, 'none', 'bare apply_patch is not intercepted')
+assert.equal(
+  parseEmbeddedApplyPatch('echo before && apply_patch <<EOF\n*** Begin Patch\n*** Add File: x.txt\n+x\n*** End Patch\nEOF').kind,
+  'none',
+  'leading commands prevent intercept'
+)
+
 // ── intercept: heredoc apply_patch never reaches the shell ─────────────────
 const startedBeforeIntercept = started.length
 const heredocCmd = [
@@ -408,6 +419,21 @@ assert.equal(started.length, startedBeforeIntercept + 1, 'trailing commands prev
 assert.equal(files.has('C:/work/extra.txt'), false, 'non-intercepted heredoc with extra commands does not apply')
 assert.ok(extra.output.includes('hi'), 'non-intercepted command still runs through the fake shell')
 
+const helpQuoted = await run(execCommand, { cmd: "apply_patch --help" })
+assert.equal(started.length, startedBeforeIntercept + 2, 'apply_patch --help is not an intercepted patch body')
+assert.equal(helpQuoted.output, 'hi\n', 'non-patch apply_patch argv still runs in the shell')
+
+const quotedHelp = await run(execCommand, { cmd: "apply_patch '--help'" })
+assert.equal(started.length, startedBeforeIntercept + 3, 'quoted non-patch apply_patch argv still reaches the shell')
+assert.equal(quotedHelp.output, 'hi\n', 'quoted --help is not treated as a patch')
+
+const prefixed = await run(execCommand, {
+  cmd: "echo before && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: prefixed.txt\n+x\n*** End Patch\nEOF",
+})
+assert.equal(started.length, startedBeforeIntercept + 4, 'leading commands prevent intercept')
+assert.equal(files.has('C:/work/prefixed.txt'), false, 'prefixed heredoc does not apply')
+assert.equal(prefixed.output, 'hi\n', 'prefixed command still runs in the shell')
+
 const implicit = await run(execCommand, {
   cmd: '*** Begin Patch\n*** Add File: implicit.txt\n+x\n*** End Patch',
 }).catch((error) => error)
@@ -418,7 +444,7 @@ assert.equal(
   'implicit invocation uses the official message'
 )
 assert.equal(files.has('C:/work/implicit.txt'), false, 'implicit patch does not write')
-assert.equal(started.length, startedBeforeIntercept + 1, 'implicit patch does not start a shell')
+assert.equal(started.length, startedBeforeIntercept + 4, 'implicit patch does not start a shell')
 
 // ── exec_command failure: prefix + 900-byte middle truncation, no cmd echo ─
 const shortFail = await run(execCommand, { cmd: 'explode-short' }).catch((error) => error)

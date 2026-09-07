@@ -99,11 +99,15 @@ const ctx = {
   fs: mockFs,
 }
 
-const { apply } = await import('./apply-patch.js')
+const { apply, pathPrefixes } = await import('./apply-patch.js')
 apply(ctx, {})
 
 const tool = captured.find((t) => t.name === 'apply_patch')
 assert.ok(tool, 'apply_patch registered')
+assert.deepEqual(pathPrefixes('regular.txt'), ['regular.txt'], 'leaf-only path is a single prefix')
+assert.deepEqual(pathPrefixes('linked/victim.txt'), ['linked', 'linked/victim.txt'], 'nested path includes ancestor prefixes')
+assert.deepEqual(pathPrefixes('C:/tmp/file.txt'), ['C:/tmp', 'C:/tmp/file.txt'], 'drive-letter path skips the bare drive')
+assert.deepEqual(pathPrefixes(''), [], 'empty path has no prefixes')
 
 const makeExec = () => ({
   agent: { session: { header: { cwd: 'C:/tmp' }, append() {} }, ctx: { effect: () => () => {} } },
@@ -338,5 +342,31 @@ const regular = await run({
 })
 assert.deepEqual(regular.files, [{ path: 'regular.txt', action: 'M' }], 'regular file update still applies')
 assert.equal(files.get('C:/tmp/regular.txt'), 'changed\n', 'regular file content updated')
+
+// ── no-follow: missing lstat must not disable ordinary apply_patch ─────────
+const originalLstatForCompat = mockFs.lstat
+delete mockFs.lstat
+files.set('C:/tmp/compat.txt', 'original\n')
+const compat = await run({
+  patch: '*** Begin Patch\n*** Update File: compat.txt\n@@\n-original\n+compat\n*** End Patch',
+})
+assert.deepEqual(compat.files, [{ path: 'compat.txt', action: 'M' }], 'apply_patch still works when lstat is absent')
+assert.equal(files.get('C:/tmp/compat.txt'), 'compat\n', 'compat update wrote through a backend without lstat')
+mockFs.lstat = originalLstatForCompat
+
+// ── no-follow: sockets/devices (`other`) are not treated as symlinks ───────
+files.set('C:/tmp/socket-like.txt', 'original\n')
+const originalLstatForOther = mockFs.lstat.bind(mockFs)
+mockFs.lstat = async (path, opts = {}) => {
+  const abs = normJoin(opts.cwd ?? 'C:/tmp', path)
+  if (abs === 'C:/tmp/socket-like.txt') return { version: 'v1', type: 'other', size: 0 }
+  return originalLstatForOther(path, opts)
+}
+files.set('C:/tmp/socket-like.txt', 'original\n')
+const otherKind = await run({
+  patch: '*** Begin Patch\n*** Update File: socket-like.txt\n@@\n-original\n+changed\n*** End Patch',
+})
+assert.deepEqual(otherKind.files, [{ path: 'socket-like.txt', action: 'M' }], 'non-symlink special files are not rejected as links')
+mockFs.lstat = originalLstatForOther
 
 console.log('apply-patch smoke test: ALL PASS')

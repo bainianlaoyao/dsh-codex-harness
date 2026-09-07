@@ -120,7 +120,14 @@ export function parseEmbeddedApplyPatch(cmd) {
   }
 
   const quoted = /^(apply_patch|applypatch)\s+(['"])([\s\S]*)\2\s*$/.exec(text)
-  if (quoted) return { kind: 'body', patch: quoted[3] }
+  if (quoted) {
+    try {
+      parsePatch(quoted[3])
+      return { kind: 'body', patch: quoted[3] }
+    } catch {
+      return { kind: 'none' }
+    }
+  }
 
   const unquoted = /^(apply_patch|applypatch)\s+([\s\S]+)$/.exec(text)
   if (unquoted && !unquoted[2].startsWith('<<')) {
