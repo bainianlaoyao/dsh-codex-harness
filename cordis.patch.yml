@@ -11,11 +11,12 @@
 #   # or, for local development:
 #   dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
 #
-# Installing this bundle also publishes the AGENT PRESET: the
-# `codex-preset-publisher` host row copies agent-presets/codex into
-# $DSH_HOME/.agent-presets/codex as a real directory (junctions are
-# invisible to scanRoot). Tool rows in that preset resolve through this
-# package's exports, so a marketplace install does not need install.ps1.
+# Installing this bundle also publishes the AGENT PRESETS: the
+# `codex-preset-publisher` host row copies agent-presets/codex and
+# agent-presets/codex-creative into $DSH_HOME/.agent-presets as real
+# directories (junctions are invisible to scanRoot). Tool rows in those
+# presets resolve through this package's exports, so a marketplace
+# install does not need install.ps1.
 #
 # NOTE: `name` resolves as a module specifier; when installed as a package the
 # rows below resolve `./plugins/...` relative to this bundle. Verify with
@@ -34,6 +35,13 @@
       config:
         apiKeyEnv: OPENAI_API_KEY
         baseURL: 'https://api.openai.com/v1'
+
+    # `tool-cordis` registers process-global inspect providers named
+    # Service/Event/Builtin/Tool. The shipped `cordis` preset already owns
+    # those ids, so a second creative preset that also mounts `tool-cordis`
+    # would fail unless duplicate first-party registrations are skipped.
+    - id: share-cordis-inspect
+      name: './plugins/tools/share-cordis-inspect.js'
 
     - id: codex-preset-publisher
       name: './plugins/preset-publisher.js'

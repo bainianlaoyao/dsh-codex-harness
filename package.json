@@ -1,7 +1,7 @@
 {
   "name": "dsh-codex-mode",
-  "description": "Lightweight Codex-shaped coding tools for DeepSeek Harness: exec_command/write_stdin, apply_patch, view_image, OpenAI model routes, and DSH-native todo_write/ask_user_question/subagent in a native DSH preset.",
-  "version": "0.1.0",
+  "description": "Lightweight Codex-shaped coding tools for DeepSeek Harness: exec_command/write_stdin, apply_patch, view_image, OpenAI model routes, DSH-native collaboration tools, and a Codex-shaped 创造模式 (cordis) preset.",
+  "version": "0.1.1",
   "license": "MIT",
   "type": "module",
   "main": "plugins/preset-publisher.js",
@@ -14,11 +14,13 @@
     "./plugins/tools/exec-command.js": "./plugins/tools/exec-command.js",
     "./plugins/tools/apply-patch.js": "./plugins/tools/apply-patch.js",
     "./plugins/tools/view-image.js": "./plugins/tools/view-image.js",
+    "./plugins/tools/share-cordis-inspect.js": "./plugins/tools/share-cordis-inspect.js",
     "./plugins/win32-atomic-write-fallback.js": "./plugins/win32-atomic-write-fallback.js",
     "./package.json": "./package.json"
   },
   "files": [
     "agent-presets/codex",
+    "agent-presets/codex-creative",
     "plugins/preset-publisher.js",
     "plugins/llm-openai.js",
     "plugins/llm-responses.js",
@@ -26,6 +28,7 @@
     "plugins/tools/exec-command.js",
     "plugins/tools/apply-patch.js",
     "plugins/tools/view-image.js",
+    "plugins/tools/share-cordis-inspect.js",
     "plugins/win32-atomic-write-fallback.js",
     "cordis.patch.yml",
     "README.md"
@@ -49,6 +52,6 @@
     "url": "git+https://github.com/bainianlaoyao/dsh-codex-harness.git"
   },
   "scripts": {
-    "test": "node agent-presets/codex/check-rows.mjs && node plugins/preset-publisher.smoke.js && node scripts/scanroot-discovery.smoke.js && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/view-image.smoke.js && node tools/restrict.smoke.js && node win32-atomic-write-fallback.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js"
+    "test": "node agent-presets/codex/check-rows.mjs && node agent-presets/codex-creative/check-rows.mjs && node plugins/preset-publisher.smoke.js && node scripts/scanroot-discovery.smoke.js && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/view-image.smoke.js && node tools/restrict.smoke.js && node tools/share-cordis-inspect.smoke.js && node win32-atomic-write-fallback.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js"
   }
 }

@@ -26,23 +26,27 @@ for (const child of children) {
   else skipped.push(row)
 }
 
-const live = kept.find((row) => row.name === 'codex')
-assert.ok(live, `scanRoot would skip the live codex preset. kept=${kept.map((r) => r.name).join(',')} skipped=${skipped.map((r) => r.name).join(',')}`)
-assert.equal(live.isSymbolicLink, false, 'live codex preset must not be a symlink/junction Dirent')
+async function assertLivePreset(id, extraNeedles = []) {
+  const live = kept.find((row) => row.name === id)
+  assert.ok(live, `scanRoot would skip the live ${id} preset. kept=${kept.map((r) => r.name).join(',')} skipped=${skipped.map((r) => r.name).join(',')}`)
+  assert.equal(live.isSymbolicLink, false, `live ${id} preset must not be a symlink/junction Dirent`)
 
-const dir = join(root, 'codex')
-const info = await stat(dir)
-assert.ok(info.isDirectory(), `${dir} must be a real directory`)
+  const dir = join(root, id)
+  const info = await stat(dir)
+  assert.ok(info.isDirectory(), `${dir} must be a real directory`)
 
-const composition = await readFile(join(dir, 'agent.cordis.yml'), 'utf8')
-for (const needle of ['id: compaction', 'dsh-compaction-basic', 'dsh-command-compact']) {
-  assert.ok(composition.includes(needle), `live codex composition missing ${needle}`)
+  const composition = await readFile(join(dir, 'agent.cordis.yml'), 'utf8')
+  for (const needle of ['id: compaction', 'dsh-compaction-basic', 'dsh-command-compact', ...extraNeedles]) {
+    assert.ok(composition.includes(needle), `live ${id} composition missing ${needle}`)
+  }
+  assert.ok(
+    composition.includes('exec-command.js'),
+    `live ${id} composition must name exec-command.js (package export or file URL)`,
+  )
+  console.log(`OK live ${id} preset is a real directory visible to scanRoot`)
 }
-assert.ok(
-  composition.includes('exec-command.js'),
-  'live codex composition must name exec-command.js (package export or file URL)',
-)
 
-console.log('OK live codex preset is a real directory visible to scanRoot')
-console.log('OK live codex composition includes compaction group and exec-command')
+await assertLivePreset('codex')
+await assertLivePreset('codex-creative', ['id: tool-cordis', 'id: planning', 'id: tool-workflow'])
+console.log('OK live compositions include compaction group and exec-command')
 console.log('scanRoot discovery check: ALL PASS')

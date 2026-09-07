@@ -11,11 +11,14 @@
 - DSH 原生工具：计划 `todo_write`、提问 `ask_user_question`、子代理 `subagent` / `subagent_fork`（+ `send_message` / `interrupt_agent` / `list_agents`）、`web_search`。
 - OpenAI Chat Completions 和 Responses API 路由。
 - `codex 工具模式` 预设：简短编码提示，`AGENTS.md` 指令加载，以及上述工具行。
+- `codex 创造模式` 预设：同一套 Codex 工具面，再叠官方创造模式（`cordis`）能力：`tool-cordis`、composition/plugin 技能、计划模式、目标、工作流与 ralph。
 
 DSH 自己继续处理工作目录、运行时上下文、沙箱、审批、压缩和宿主工具。预设只
 替换工具面（codex 形状的终端与补丁工具），计划/提问/子代理等协作工具一律使用
 DSH 原生实现；不会注入 Codex 格式的 `<environment_context>` 或
-`<current_time_reminder>`。
+`<current_time_reminder>`。`codex 创造模式` 会再挂一份 `tool-cordis`；host
+行 `share-cordis-inspect` 让它与官方创造模式共用全局 inspect provider，避免
+`Service is already registered`。
 
 ## 安装
 
@@ -25,10 +28,12 @@ dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
 # dsh plugin --profile web add dsh-codex-mode
 ```
 
-重启 DSH 后，host 行 `codex-preset-publisher` 会把包内 `agent-presets/codex`
-**自动复制**到 `$DSH_HOME/.agent-presets/codex`（真实目录，不是 junction）。
-新会话选择 **codex 工具模式**。`openai-responses` 路由可将 `apply_patch`
-作为自由格式 custom tool；Chat Completions 路由则将它作为普通函数调用。
+重启 DSH 后，host 行 `codex-preset-publisher` 会把包内
+`agent-presets/codex` 和 `agent-presets/codex-creative` **自动复制**到
+`$DSH_HOME/.agent-presets/`（真实目录，不是 junction）。新会话可选择
+**codex 工具模式** 或 **codex 创造模式**。`openai-responses` 路由可将
+`apply_patch` 作为自由格式 custom tool；Chat Completions 路由则将它作为
+普通函数调用。
 
 离线/开发备用：`scripts/install.ps1` 仍可手工复制同一份预设，并保留
 `$DSH_HOME/plugins` junction。日常用户不需要跑它。

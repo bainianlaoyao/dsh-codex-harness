@@ -33,7 +33,7 @@
  */
 
 import {
-  CallId,
+  ToolCallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmAdapter,
@@ -351,12 +351,12 @@ function closeToolBlock(block, freeformTools) {
   if (block.kind === 'custom') {
     return {
       type: 'tool-call',
-      id: CallId(block.callId),
+      id: ToolCallId(block.callId),
       name: block.name,
       arguments: JSON.stringify({ patch: block.raw }),
     }
   }
-  return { type: 'tool-call', id: CallId(block.callId), name: block.name, arguments: block.raw }
+  return { type: 'tool-call', id: ToolCallId(block.callId), name: block.name, arguments: block.raw }
 }
 
 /**
@@ -491,7 +491,7 @@ async function* translate(payloads) {
             }
             block.finished = true
             toolCallCount++
-            yield { type: 'tool-call-delta', index: block.index, id: CallId(block.callId), name: block.name, argumentsDelta: block.raw }
+            yield { type: 'tool-call-delta', index: block.index, id: ToolCallId(block.callId), name: block.name, argumentsDelta: block.raw }
             yield { type: 'block-end', index: block.index, block: closeToolBlock(block) }
           }
           break

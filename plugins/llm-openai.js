@@ -19,7 +19,7 @@
  */
 
 import {
-  CallId,
+  ToolCallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmAdapter,
@@ -292,7 +292,7 @@ function closeBlock(block) {
     case 'reasoning':
       return { type: 'reasoning', text: block.text }
     case 'tool-call':
-      return { type: 'tool-call', id: CallId(block.callId ?? ''), name: block.name ?? '', arguments: block.text }
+      return { type: 'tool-call', id: ToolCallId(block.callId ?? ''), name: block.name ?? '', arguments: block.text }
   }
 }
 
@@ -368,7 +368,7 @@ async function* translate(payloads) {
         yield {
           type: 'tool-call-delta',
           index: block.index,
-          id: CallId(block.callId ?? ''),
+          id: ToolCallId(block.callId ?? ''),
           ...(block.name === undefined ? {} : { name: block.name }),
           argumentsDelta: fragment,
         }
