@@ -249,8 +249,8 @@ assert.equal(posixShell.exit_code, 0, 'POSIX shell alias /bin/sh accepted and ma
 
 // ── yield → session id → write_stdin poll ──────────────────────────────────
 const slow = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
-assert.equal(typeof slow.session_id, 'number', 'yielded session id')
-assert.ok(slow.session_id >= 1000 && slow.session_id < 100000, 'session id in the official 1000..100000 range')
+assert.equal(typeof slow.session_id, 'string', 'yielded session id')
+assert.ok(slow.session_id.length > 0, 'session id is non-empty')
 assert.equal(slow.output, '', 'no output yet at yield')
 const polled = await run(writeStdin, { session_id: slow.session_id, chars: '', yield_time_ms: 500 })
 assert.ok(polled.session_id === undefined, 'still-running poll returns no exit code')
@@ -258,7 +258,7 @@ assert.ok(polled.output === '', 'no new output in the poll')
 
 // ── delta semantics: only NEW output after the first read ──────────────────
 const trickle = await run(execCommand, { cmd: 'trickle', yield_time_ms: 250 })
-assert.equal(typeof trickle.session_id, 'number', 'trickle yielded')
+assert.equal(typeof trickle.session_id, 'string', 'trickle yielded')
 assert.ok(trickle.output.includes('one'), 'first chunk delivered at yield')
 assert.ok(!trickle.output.includes('two'), 'second chunk not yet delivered')
 const poll2 = await run(writeStdin, { session_id: trickle.session_id, chars: '', yield_time_ms: 5000 })
@@ -281,14 +281,14 @@ const aliveAfterStray = await run(writeStdin, { session_id: runaway2.session_id,
 assert.ok(aliveAfterStray.session_id === undefined || aliveAfterStray.exit_code === null, 'stray write did not kill the session')
 await run(writeStdin, { session_id: runaway2.session_id, chars: '\u0003', yield_time_ms: 2000 })
 
-const unknown = await run(writeStdin, { session_id: 9999, chars: '' }).catch((error) => error)
-assert.ok(unknown instanceof Error && /Unknown process id 9999/.test(unknown.message), 'unknown session uses the official message')
+const unknown = await run(writeStdin, { session_id: "exec-session-9999", chars: '' }).catch((error) => error)
+assert.ok(unknown instanceof Error && /Unknown process id exec-session-9999/.test(unknown.message), 'unknown session uses the official message')
 
 // ── registry cap: 64 processes → LRU eviction (never an error) ─────────────
 const ids = []
 for (let i = 0; i < 65; i++) {
   const result = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
-  assert.equal(typeof result.session_id, 'number', 'session ' + i + ' allocated')
+  assert.equal(typeof result.session_id, 'string', 'session ' + i + ' allocated')
   ids.push(result.session_id)
 }
 assert.equal(new Set(ids).size, 65, '65 sessions allocated')
@@ -314,13 +314,8 @@ for (const key of ['cmd', 'workdir', 'tty', 'yield_time_ms', 'max_output_tokens'
 assert.ok((execCommand.parameters.required ?? []).includes('cmd'), 'cmd required')
 for (const key of ['sandbox_permissions', 'justification', 'prefix_rule', 'description'])
   assert.equal(params[key], undefined, 'compatibility field stays out of the wire schema: ' + key)
-assert.equal(
-  execCommand.description,
-  'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n' +
-    'This deployment provides exactly one shell: git bash. Write POSIX bash syntax; ' +
-    'only the `shell` values listed in the shell parameter are accepted.',
-  'exec_command description is the short git-bash contract (no PowerShell-centric win32 text)',
-)
+assert.ok(execCommand.description.includes('Long-running commands are also registered as DSH background jobs.'), 'exec_command documents DSH jobs')
+assert.ok(execCommand.description.includes('job_output'), 'exec_command documents job waiting')
 assert.ok(!/powershell|cmd\.exe|Start-Process|Remove-Item/i.test(execCommand.description), 'no PowerShell-only vocabulary in the description')
 assert.ok(params.shell.description.includes('only provides git bash'), 'shell param names git bash as the only shell')
 for (const value of SHELL_VALUES) assert.ok(params.shell.description.includes(value), 'shell param lists accepted value: ' + value)

@@ -48,6 +48,9 @@
 - id: tool-codex-view-image
   name: 'dsh-codex-mode/plugins/tools/view-image.js'
 
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
 # ── DSH-native collaboration tools ───────────────────────────────────────────
 # plan / ask-user / delegation are DSH NATIVE tools. The web surface disables
 # the host rows for them, so the preset mounts them per-session — the same

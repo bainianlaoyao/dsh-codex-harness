@@ -25,8 +25,7 @@
  * - yields: exec_command clamps 250-30000 ms (Windows floor 10000 ms, the
  *   deployment platform), write_stdin polls 5000-300000 ms, writes
  *   250-30000 ms (process_manager.rs).
- * - sessions: random ids in 1000..100000 (process_manager.rs
- *   random_range(1_000..100_000)), MAX_UNIFIED_EXEC_PROCESSES = 64 with LRU
+ * - sessions: shared DSH job ids (`exec-N`), MAX_UNIFIED_EXEC_PROCESSES = 64 with LRU
  *   eviction (exited processes first) instead of a hard error.
  * - write_stdin: \u0003 interrupts (the seam kills the process; signal-death
  *   renders no exit-code section like the Option<exit_code> path); ANY other
@@ -357,7 +356,7 @@ export function truncatedOutputBody(value) {
  * Render the metadata header of an exec result — response_header()
  * (core/src/tools/context.rs as of rust-v0.153.4): Chunk ID → Wall time
  * (4 decimals) → Process exited with code → Process running with session ID
- * → Original token count → "Output:".
+ * → Background job ID → Original token count → "Output:".
  */
 export function renderExecHeader(value) {
   const sections = []
@@ -370,6 +369,9 @@ export function renderExecHeader(value) {
   }
   if (value.session_id !== undefined) {
     sections.push(`Process running with session ID ${value.session_id}`)
+  }
+  if (value.job_id !== undefined) {
+    sections.push(`Background job ID: ${value.job_id}`)
   }
   if (value.original_token_count !== undefined && value.original_token_count !== null) {
     sections.push(`Original token count: ${value.original_token_count}`)
@@ -413,11 +415,12 @@ function generateChunkId() {
   return out
 }
 
-/** One live background session, keyed by the numeric id the model sees. */
+/** One live background session, keyed by the shared DSH job/session id. */
 class ExecSession {
-  constructor(proc, owner) {
+  constructor(proc, owner, jobId = undefined) {
     this.proc = proc
     this.owner = owner
+    this.jobId = jobId
     this.total = ""
     this.delivered = 0
     this.exitCode = null
@@ -452,11 +455,12 @@ class ExecRegistry {
     }
     return entry
   }
-  alloc(owner, proc) {
+  alloc(owner, proc, id) {
     const entry = this.forOwner(owner)
     if (entry.sessions.size >= MAX_SESSIONS_PER_OWNER) this.evict(entry)
-    let id = 0
-    do { id = 1000 + Math.floor(Math.random() * 99000) } while (entry.sessions.has(id))
+    if (id === undefined) {
+      do { id = `exec-session-${1000 + Math.floor(Math.random() * 99000)}` } while (entry.sessions.has(id))
+    }
     const session = new ExecSession(proc, owner)
     entry.sessions.set(id, session)
     entry.order.push(id)
@@ -554,6 +558,7 @@ async function waitSettled(proc, deadline) {
  */
 const EXEC_COMMAND_DESCRIPTION =
   'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n' +
+  'Long-running commands are also registered as DSH background jobs. Use `write_stdin` with the numeric session ID for PTY interaction; use `job_output` with the returned job ID to read output or wait for completion, `job_list` to inspect jobs, and `job_kill` to stop one.\n\n' +
   'This deployment provides exactly one shell: git bash. Write POSIX bash syntax; ' +
   'only the `shell` values listed in the shell parameter are accepted.'
 
@@ -565,7 +570,8 @@ const execOutputSchema = {
     chunk_id: { type: "string", description: "Chunk identifier included when the response reports one." },
     wall_time_seconds: { type: "number", required: true, description: "Elapsed wall time spent waiting for output in seconds." },
     exit_code: { type: "number", description: "Process exit code when the command finished during this call." },
-    session_id: { type: "number", description: "Session identifier to pass to write_stdin when the process is still running." },
+    session_id: { type: "string", description: "Shared session/job identifier to pass to write_stdin or job_output." },
+    job_id: { type: "string", description: "DSH background job identifier to pass to job_output, job_list, or job_kill." },
     original_token_count: { type: "number", description: "Approximate token count before output truncation." },
     output: { type: "string", required: true, description: "Command output text, possibly truncated." },
     // DSH-internal transport only (never serialized to the model wire — the
@@ -620,6 +626,7 @@ function makeBuffer(config) {
 
 function registerExecCommand(ctx, config) {
   const registry = new ExecRegistry(ctx)
+  const jobs = ctx.get('jobs')
 
   const execCommand = defineTool({
     name: 'exec_command',
@@ -683,8 +690,42 @@ function registerExecCommand(ctx, config) {
       const start = Date.now()
 
       let proc
+      let jobId
+      let jobSession
+      const jobHolder = { proc: undefined, session: undefined }
+      const jobOutputBuffer = makeBuffer(config)
       try {
-        proc = startShell(ctx, exec, args.cmd, cwd)
+        // Register the process with DSH's job registry before it can outlive
+        // this tool call. The mutable holder bridges the synchronous job
+        // starter and the Codex session created after the initial yield.
+        if (jobs === undefined) {
+          proc = startShell(ctx, exec, args.cmd, cwd)
+        } else jobId = jobs.start({
+          kind: 'exec',
+          label: args.cmd,
+          owner,
+          outputLimitBytes: config.maxOutputBytes ?? UNIFIED_EXEC_OUTPUT_MAX_BYTES,
+          run() {
+            proc = startShell(ctx, exec, args.cmd, cwd)
+            jobHolder.proc = proc
+            const done = Promise.resolve(proc.done).then(() => ({
+              status: proc.status === 'killed' ? 'killed' : proc.exitCode === 0 ? 'completed' : 'failed',
+              detail: proc.exitCode === null || proc.exitCode === undefined ? proc.status : `exit code ${proc.exitCode}`,
+            }))
+            return {
+              cancel(reason) {
+                if (!settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
+              },
+              done,
+              readOutput() {
+                const before = jobOutputBuffer.totalObservedBytes
+                drainOutput(proc, jobOutputBuffer)
+                if (jobOutputBuffer.totalObservedBytes === before) return ''
+                return jobOutputBuffer.toTextWithOmissionMarker()
+              },
+            }
+          },
+        })
       } catch (error) {
         throw new Error(formatExecCommandFailure(error))
       }
@@ -693,7 +734,7 @@ function registerExecCommand(ctx, config) {
       }
       exec.signal.addEventListener('abort', onAbort, { once: true })
       try {
-        const buffer = makeBuffer(config)
+        const buffer = jobOutputBuffer
         const deadlineEnd = Date.now() + yieldMs
         while (!settled(proc)) {
           drainOutput(proc, buffer)
@@ -718,11 +759,19 @@ function registerExecCommand(ctx, config) {
             model_output_max_tokens: maxTokens,
           })
         }
-        const { id } = registry.alloc(owner, proc)
+        const allocated = registry.alloc(owner, proc, jobId)
+        const id = allocated.id
+        allocated.session.jobId = jobId
+        jobSession = allocated.session
+        jobHolder.session = jobSession
+        // The job registry owns the same process, while the Codex registry
+        // keeps the numeric session id required by write_stdin.
+        jobSession.jobId = jobId
         const output = buildOutput(null, buffer, maxTokens)
         return compact({
           chunk_id: chunkId,
           session_id: id,
+          job_id: jobId,
           wall_time_seconds: wallTime,
           output: output.output,
           truncated: output.truncated,
@@ -741,7 +790,7 @@ function registerExecCommand(ctx, config) {
     name: 'write_stdin',
     description: 'Writes characters to an existing unified exec session and returns recent output.',
     parameters: {
-      session_id: { type: 'number', required: true, description: 'Identifier of the running unified exec session.' },
+      session_id: { type: 'string', required: true, description: 'Shared session/job identifier for write_stdin or job_output.' },
       chars: { type: 'string', description: 'Bytes to write to stdin. Defaults to empty, which polls without writing.' },
       yield_time_ms: {
         type: 'number',
