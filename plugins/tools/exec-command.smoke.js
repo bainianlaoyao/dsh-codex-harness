@@ -71,6 +71,12 @@ function scriptFor(command) {
 }
 
 const captured = []
+const jobRuns = []
+let jobsService = { start(spec) {
+  const handle = spec.run()
+  jobRuns.push(handle)
+  return `exec-${jobRuns.length}`
+} }
 const started = []
 const files = new Map()
 const dirs = new Set(['C:/work'])
@@ -141,6 +147,7 @@ const ctx = {
   tools: { register: (definition) => captured.push(definition) },
   fs: mockFs,
   get(service) {
+    if (service === 'jobs') return jobsService
     if (service === 'shellEnv') return { collect: () => ({ DSH_TEST: '1' }) }
     return undefined
   },
@@ -171,6 +178,22 @@ assert.ok(writeStdin, 'write_stdin registered')
 
 const owner = { session: { header: { cwd: 'C:/work' } }, ctx: { effect: () => () => {} } }
 const run = (definition, args) => definition.execute(args, { agent: owner, signal: new AbortController().signal, callId: 'call-1' })
+
+// Job-backed foreground commands must never emit redundant completion notices.
+const fastJob = await run(execCommand, { cmd: 'echo hi', yield_time_ms: 250 })
+assert.equal(fastJob.exit_code, 0)
+const failedJob = await run(execCommand, { cmd: 'crash', yield_time_ms: 250 })
+assert.equal(failedJob.exit_code, 2)
+assert.equal(jobRuns.length, 0, 'foreground success and failure never register jobs')
+const deferredJob = await run(execCommand, { cmd: 'never', yield_time_ms: 250 })
+assert.equal(jobRuns.length, 1, 'only a yielded process becomes a job')
+assert.equal(deferredJob.session_id, deferredJob.job_id, 'one shared identifier')
+jobRuns[0].cancel()
+assert.equal((await jobRuns[0].done).status, 'killed', 'job cancellation owns existing process')
+const startJob = jobsService.start
+jobsService.start = () => { throw new Error('job limit') }
+await assert.rejects(run(execCommand, { cmd: 'never', yield_time_ms: 250 }), /job limit/)
+jobsService.start = startJob
 
 // ── foreground completion ──────────────────────────────────────────────────
 const quick = await run(execCommand, { cmd: 'echo hi' })

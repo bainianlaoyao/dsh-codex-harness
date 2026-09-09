@@ -558,7 +558,7 @@ async function waitSettled(proc, deadline) {
  */
 const EXEC_COMMAND_DESCRIPTION =
   'Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n' +
-  'Long-running commands are also registered as DSH background jobs. Use `write_stdin` with the numeric session ID for PTY interaction; use `job_output` with the returned job ID to read output or wait for completion, `job_list` to inspect jobs, and `job_kill` to stop one.\n\n' +
+  'Long-running commands are also registered as DSH background jobs. Use `write_stdin` with the shared session/job ID for PTY interaction; use `job_output` with the returned job ID to read output or wait for completion, `job_list` to inspect jobs, and `job_kill` to stop one.\n\n' +
   'This deployment provides exactly one shell: git bash. Write POSIX bash syntax; ' +
   'only the `shell` values listed in the shell parameter are accepted.'
 
@@ -695,37 +695,10 @@ function registerExecCommand(ctx, config) {
       const jobHolder = { proc: undefined, session: undefined }
       const jobOutputBuffer = makeBuffer(config)
       try {
-        // Register the process with DSH's job registry before it can outlive
-        // this tool call. The mutable holder bridges the synchronous job
-        // starter and the Codex session created after the initial yield.
-        if (jobs === undefined) {
-          proc = startShell(ctx, exec, args.cmd, cwd)
-        } else jobId = jobs.start({
-          kind: 'exec',
-          label: args.cmd,
-          owner,
-          outputLimitBytes: config.maxOutputBytes ?? UNIFIED_EXEC_OUTPUT_MAX_BYTES,
-          run() {
-            proc = startShell(ctx, exec, args.cmd, cwd)
-            jobHolder.proc = proc
-            const done = Promise.resolve(proc.done).then(() => ({
-              status: proc.status === 'killed' ? 'killed' : proc.exitCode === 0 ? 'completed' : 'failed',
-              detail: proc.exitCode === null || proc.exitCode === undefined ? proc.status : `exit code ${proc.exitCode}`,
-            }))
-            return {
-              cancel(reason) {
-                if (!settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
-              },
-              done,
-              readOutput() {
-                const before = jobOutputBuffer.totalObservedBytes
-                drainOutput(proc, jobOutputBuffer)
-                if (jobOutputBuffer.totalObservedBytes === before) return ''
-                return jobOutputBuffer.toTextWithOmissionMarker()
-              },
-            }
-          },
-        })
+        // Start outside the job registry first. Short commands are returned
+        // by this tool call and must not create a completion notice. A job is
+        // registered only after the foreground yield is exhausted.
+        proc = startShell(ctx, exec, args.cmd, cwd)
       } catch (error) {
         throw new Error(formatExecCommandFailure(error))
       }
@@ -759,6 +732,31 @@ function registerExecCommand(ctx, config) {
             model_output_max_tokens: maxTokens,
           })
         }
+        if (jobs !== undefined) jobId = jobs.start({
+          kind: 'exec',
+          label: args.cmd,
+          owner,
+          outputLimitBytes: config.maxOutputBytes ?? UNIFIED_EXEC_OUTPUT_MAX_BYTES,
+          run() {
+            jobHolder.proc = proc
+            const done = Promise.resolve(proc.done).then(() => ({
+              status: proc.status === 'killed' ? 'killed' : proc.exitCode === 0 ? 'completed' : 'failed',
+              detail: proc.exitCode === null || proc.exitCode === undefined ? proc.status : `exit code ${proc.exitCode}`,
+            }))
+            return {
+              cancel(reason) {
+                if (!settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
+              },
+              done,
+              readOutput() {
+                const before = jobOutputBuffer.totalObservedBytes
+                drainOutput(proc, jobOutputBuffer)
+                if (jobOutputBuffer.totalObservedBytes === before) return ''
+                return jobOutputBuffer.toTextWithOmissionMarker()
+              },
+            }
+          },
+        })
         const allocated = registry.alloc(owner, proc, jobId)
         const id = allocated.id
         allocated.session.jobId = jobId
@@ -779,6 +777,11 @@ function registerExecCommand(ctx, config) {
           output_omitted_bytes: output.output_omitted_bytes,
           model_output_max_tokens: maxTokens,
         })
+      } catch (error) {
+        // Promotion can fail (for example at the owner concurrency limit).
+        // Do not leave an unregistered process alive after the tool fails.
+        if (!settled(proc)) await Promise.resolve(proc.kill()).catch(() => {})
+        throw error
       } finally {
         exec.signal.removeEventListener('abort', onAbort)
       }
