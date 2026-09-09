@@ -26,6 +26,7 @@
     "plugins/llm-responses.js",
     "plugins/tools/restrict.js",
     "plugins/tools/exec-command.js",
+    "plugins/tools/echo-noise.js",
     "plugins/tools/apply-patch.js",
     "plugins/tools/view-image.js",
     "plugins/tools/share-cordis-inspect.js",
