@@ -18,28 +18,39 @@
 # presets resolve through this package's exports, so a marketplace
 # install does not need install.ps1.
 #
-# NOTE: `name` resolves as a module specifier; when installed as a package the
-# rows below resolve `./plugins/...` relative to this bundle. Verify with
-# `dsh --profile web dump-config` after install (the working profile patch
-# already carries these two rows under `./dsh-codex/...`; remove those first to
-# avoid duplicate route registration).
+# ── EXACTLY ONE client-bearing row ─────────────────────────────────────────
+# client-modules reads a row's package root out of the row's module location
+# (`locatePkgJson` → `nearestPackage`). A BARE PACKAGE SUBPATH returns
+# `undefined` immediately there, but a PATH-LIKE specifier (`./plugins/x.js`,
+# `file:…/x.js`) resolves to the nearest ancestor manifest — which for every
+# row in this patch is THIS package. Seven path-like rows therefore register
+# seven sources for one packageName and the registry refuses to compose:
+#
+#   client-modules: package dsh-codex-mode resolves from multiple active
+#   Loader sources: …; remove one entry
+#
+# That is a hard boot failure, not a silent no-UI. So: the six host rows use
+# bare package SUBPATHS (no client source), and `codex-preset-publisher` — the
+# one row whose host half IS the package root export, plugins/preset-publisher.js
+# — is mounted by BARE PACKAGE NAME and is the single row that composes
+# plugins/client.js (设置 → Codex 子代理).
 - insert:
     # Keep child preset restoration available even when a cold continuation
     # originates from a parent which does not mount the Codex tool adapter.
     - id: codex-typed-subagent-presets
-      name: './plugins/typed-subagent-presets.js'
+      name: 'dsh-codex-mode/plugins/typed-subagent-presets.js'
 
     - id: codex-agent-types
-      name: './plugins/agent-types.js'
+      name: 'dsh-codex-mode/plugins/agent-types.js'
 
     - id: llm-openai
-      name: './plugins/llm-openai.js'
+      name: 'dsh-codex-mode/plugins/llm-openai.js'
       config:
         apiKeyEnv: OPENAI_API_KEY
         baseURL: 'https://api.openai.com/v1'
 
     - id: llm-responses
-      name: './plugins/llm-responses.js'
+      name: 'dsh-codex-mode/plugins/llm-responses.js'
       config:
         apiKeyEnv: OPENAI_API_KEY
         baseURL: 'https://api.openai.com/v1'
@@ -49,10 +60,13 @@
     # those ids, so a second creative preset that also mounts `tool-cordis`
     # would fail unless duplicate first-party registrations are skipped.
     - id: share-cordis-inspect
-      name: './plugins/tools/share-cordis-inspect.js'
+      name: 'dsh-codex-mode/plugins/tools/share-cordis-inspect.js'
 
+    # BARE PACKAGE NAME ON PURPOSE — the single client-bearing row. Do not
+    # rewrite this to './plugins/preset-publisher.js': that moves the package's
+    # client composition onto a second source and fails the boot.
     - id: codex-preset-publisher
-      name: './plugins/preset-publisher.js'
+      name: 'dsh-codex-mode'
 
     # Windows atomic writes copy the target DACL then ReplaceFileW. On ReFS
     # (and NTFS files whose inherited ACL is only Modify, not WRITE_DAC)
@@ -61,4 +75,4 @@
     # row hooks ctx.fs.internals so a WRITE_DAC refusal falls back to
     # rename. Bump `?v=` after editing the file under a running dsh.
     - id: win32-atomic-write-fallback
-      name: './plugins/win32-atomic-write-fallback.js'
+      name: 'dsh-codex-mode/plugins/win32-atomic-write-fallback.js'
