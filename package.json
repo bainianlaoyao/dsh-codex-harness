@@ -1,11 +1,15 @@
 {
   "name": "dsh-codex-mode",
   "description": "Lightweight Codex-shaped coding tools for DeepSeek Harness: exec_command/write_stdin, apply_patch, view_image, OpenAI model routes, DSH-native collaboration tools, and a Codex-shaped 创造模式 (cordis) preset.",
-  "version": "0.1.4",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "plugins/preset-publisher.js",
   "exports": {
+    "./client": "./plugins/client.js",
+    "./plugins/agent-types.js": "./plugins/agent-types.js",
+    "./plugins/typed-subagents.js": "./plugins/typed-subagents.js",
+    "./plugins/typed-subagent-presets.js": "./plugins/typed-subagent-presets.js",
     ".": "./plugins/preset-publisher.js",
     "./plugins/preset-publisher.js": "./plugins/preset-publisher.js",
     "./plugins/llm-openai.js": "./plugins/llm-openai.js",
@@ -19,6 +23,10 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "plugins/client.js",
+    "plugins/agent-types.js",
+    "plugins/typed-subagents.js",
+    "plugins/typed-subagent-presets.js",
     "agent-presets/codex",
     "agent-presets/codex-creative",
     "plugins/preset-publisher.js",
@@ -35,6 +43,14 @@
     "README.md"
   ],
   "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings-general"
+      ],
+      "platform": "web"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
@@ -48,11 +64,30 @@
     "openai",
     "responses-api"
   ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-tool-subagent": "^0.1.2-rc.1 || ^0.1.5-rc.1",
+    "@deepseek-ai/dsh-scope": "^0.1.2-rc.1 || ^0.1.5-rc.1",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-agent-presets": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-session-projection": "^0.1.5-rc.1",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
+    "playwright": "1.60.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bainianlaoyao/dsh-codex-harness.git"
   },
   "scripts": {
+    "test:e2e": "node scripts/agent-types.e2e.mjs",
+    "posttest": "npm run test:agents",
+    "test:agents": "node plugins/agent-types.smoke.js && node plugins/typed-subagents.smoke.js && node plugins/typed-subagent-presets.smoke.js && node plugins/client.smoke.js",
     "test": "node agent-presets/codex/check-rows.mjs && node agent-presets/codex-creative/check-rows.mjs && node plugins/preset-publisher.smoke.js && node scripts/scanroot-discovery.smoke.js && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/view-image.smoke.js && node tools/restrict.smoke.js && node tools/share-cordis-inspect.smoke.js && node win32-atomic-write-fallback.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js"
   }
 }

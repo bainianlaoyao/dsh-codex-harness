@@ -40,6 +40,8 @@ try {
   const published = readFileSync(join(targetDir, 'agent.cordis.yml'), 'utf8')
   assert.ok(published.includes('id: compaction'))
   assert.equal(published.includes("name: 'dsh-codex-mode/plugins/tools/"), false)
+  assert.equal(published.includes("name: 'dsh-codex-mode/plugins/typed-subagents.js'"), false)
+  assert.ok(published.includes(pathToFileURL(join(repoRoot, 'plugins', 'typed-subagents.js')).href))
   const execUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'tools', 'exec-command.js')).href
   assert.ok(published.includes(`name: '${execUrl}'`), `expected file URL ${execUrl}`)
   const marker = JSON.parse(readFileSync(join(targetDir, '.dsh-codex-mode-published'), 'utf8'))

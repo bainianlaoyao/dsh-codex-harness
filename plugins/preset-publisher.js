@@ -37,6 +37,7 @@ const MARKER_FILE = '.dsh-codex-mode-published'
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const TOOL_EXPORTS = {
+  'dsh-codex-mode/plugins/typed-subagents.js': 'plugins/typed-subagents.js',
   'dsh-codex-mode/plugins/tools/restrict.js': 'plugins/tools/restrict.js',
   'dsh-codex-mode/plugins/tools/exec-command.js': 'plugins/tools/exec-command.js',
   'dsh-codex-mode/plugins/tools/apply-patch.js': 'plugins/tools/apply-patch.js',

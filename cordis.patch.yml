@@ -24,6 +24,14 @@
 # already carries these two rows under `./dsh-codex/...`; remove those first to
 # avoid duplicate route registration).
 - insert:
+    # Keep child preset restoration available even when a cold continuation
+    # originates from a parent which does not mount the Codex tool adapter.
+    - id: codex-typed-subagent-presets
+      name: './plugins/typed-subagent-presets.js'
+
+    - id: codex-agent-types
+      name: './plugins/agent-types.js'
+
     - id: llm-openai
       name: './plugins/llm-openai.js'
       config:

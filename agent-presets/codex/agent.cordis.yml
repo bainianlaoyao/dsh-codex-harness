@@ -4,7 +4,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: |-
+    prefix: |-
       You are a precise, pragmatic coding agent running in DeepSeek Harness.
       Work directly in the user's repository and carry requests through implementation and verification.
 
@@ -71,19 +71,8 @@
 - id: tool-subagent-list-agents
   name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
-- id: tool-subagent
-  name: '@deepseek-ai/dsh-tool-subagent'
-  config:
-    provider: spawn
-    toolName: subagent
-    backgroundMode: continuable
-
-- id: tool-subagent-fork
-  name: '@deepseek-ai/dsh-tool-subagent'
-  config:
-    provider: fork
-    toolName: subagent_fork
-    backgroundMode: continuable
+- id: codex-typed-subagents
+  name: 'dsh-codex-mode/plugins/typed-subagents.js'
 
 # DSH-native web_search. The host `tool-web` row is disabled on the web
 # surface, so presets mount their own; the search provider resolves from the

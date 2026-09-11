@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const presetDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = join(presetDir, '..', '..')
 const rows = [
+  'dsh-codex-mode/plugins/typed-subagents.js',
   'dsh-codex-mode/plugins/tools/exec-command.js',
   'dsh-codex-mode/plugins/tools/apply-patch.js',
   'dsh-codex-mode/plugins/tools/view-image.js',
