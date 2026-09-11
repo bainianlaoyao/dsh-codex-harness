@@ -93,6 +93,22 @@ Preset 是可执行插件组合，应只选择可信预设；切换后不再保�
 E2E 只模拟模型目录；HTTP 通过 Playwright 路由桥接 Host handler，不启动替代服务器，也不消耗真实模型额度。
 它不代替已登录生产 GUI 的集成验证。
 
+**安装路径回归（0.3.2）**：`scripts/bundle-patch.smoke.js` 专门守
+`dsh plugin --profile <name> add dsh-codex-mode` 这条市场安装路径。它按
+`npm pack --dry-run --json` **复制出真实的已发布布局**，再在其中解析本包
+`cordis.patch.yml` 的每一行，断言同一个包最多只有一行带客户端、且本包恰好带一次。
+
+为什么必须复制发布布局、不能在仓库工作树里查：仓库带有 `plugins/package.json`
+（private，name `dsh-codex`，**不在发布白名单里**），它会截断 client-modules 的
+包根回溯，让路径式行解析到一个没有 `dsh.client` 的包——于是在仓库里检查会得出
+「干净」的结论，而同样的 bundle patch 装在真实 profile 里会直接启动失败。
+
+背景：0.3.0 的 bundle patch 用路径式写法（`./plugins/x.js`）挂了 7 行，每行都解析到
+本包，于是同一个包名注册出 7 个 client source，`client-modules` 拒绝组装，市场默认
+安装命令产出**起不来的 profile**。该缺陷在 0.3.1 修复；本测试确保它不会复发，
+同时也守住 "新增插件行却忘了加进 `files`/`exports`" 这类只在安装后才暴露的问题，
+以及 README 里引用的截图必须随包发布（否则 registry 页面显示裂图）。
+
 开发依赖可在干净 clone 安装，并用 `npx playwright install chromium` 安装测试浏览器。
 本机临时 `node_modules` 是指向 DSH 依赖的 junction，**不要在该 junction 上运行 npm install**；
 可在独立测试目录安装 Playwright 1.60.0、React/ReactDOM 18.3.1，设置 `DSH_E2E_DEPS` 为其 node_modules 路径。
