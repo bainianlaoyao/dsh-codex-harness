@@ -2,6 +2,11 @@
 
 轻量的 DeepSeek Harness 编码预设。它借用 Codex 常用的工具名称和编辑工作流，但不复刻 Codex 的运行时上下文、审批策略或压缩器。
 
+面向 GPT 系模型设计：自带 OpenAI Chat Completions 与 Responses API 两条路由，
+`codex 工具模式` / `codex 创造模式` 两个预设可直接选中使用。
+
+![Codex 预设](assets/screenshots/codex-agent-presets.png)
+
 ## 提供内容
 
 - `exec_command` / `write_stdin`：DSH shell 适配器，保留长命令轮询和输出截断体验。
@@ -41,6 +46,8 @@ dsh plugin --profile web add file:D:/Data/DEV/dsh/dsh-codex-mode
 下拉目录来自 DSH 原生 LLM 服务，包含所有已注册提供商的广告模型；推理强度来自模型元数据，不硬编码。
 这里保存的是子代理配置，不会调用会话的模型切换接口，不会修改主会话/全局默认模型，也不复制 API key。
 模型目录加载失败时可刷新重试；保存采用 DSH settings 原生版本校验，避免多个页面相互覆盖。
+
+![Codex 子代理类型](assets/screenshots/subagent-types.png)
 
 **类型不携带指令（0.3.0）**：类型只是「委派配置」，决定子代理的 LLM 路由和 Preset 组合，
 其 `description` 是父代理挑选类型时能看到的唯一文本。每个子代理的启动 prompt
