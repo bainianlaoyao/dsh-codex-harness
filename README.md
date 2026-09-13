@@ -1,5 +1,7 @@
 # dsh-codex-mode
 
+**中文** | [English](README.en.md)
+
 轻量的 DeepSeek Harness 编码预设。它借用 Codex 常用的工具名称和编辑工作流，但不复刻 Codex 的运行时上下文、审批策略或压缩器。
 
 面向 GPT 系模型设计：自带 OpenAI Chat Completions 与 Responses API 两条路由，
