@@ -11,6 +11,11 @@
  * web surface disables host-plane compaction, so a preset without this group
  * never registers `/compact`.
  *
+ * And asserts the skill surface (`skill-filesystem` + `tool-skill`). Those two
+ * rows are what turn `/name` and the composer's `/` menu into anything at all:
+ * the web surface disables the host-plane copies, so a preset that omits them
+ * gets no `skill` tool, no `<available_skills>` catalog, and an empty menu.
+ *
  * Usage: node check-rows.mjs  (from the preset directory)
  */
 import assert from 'node:assert/strict'
@@ -44,10 +49,14 @@ for (const needle of [
   'name: \'@deepseek-ai/dsh-compaction-basic\'',
   'name: \'@deepseek-ai/dsh-command-compact\'',
   'name: \'@deepseek-ai/dsh-compaction-tool-result-pruner\'',
+  'id: skill-filesystem',
+  'name: \'@deepseek-ai/dsh-skill-filesystem\'',
+  'id: tool-skill',
+  'name: \'@deepseek-ai/dsh-tool-skill\'',
   ...rows.map((specifier) => `name: '${specifier}'`),
 ]) {
   assert.ok(composition.includes(needle), `composition must include ${needle}`)
 }
 assert.equal(composition.includes('../../plugins/tools/'), false, 'composition must not use repo-relative plugin paths')
-console.log('OK compaction group and package-export tool rows present')
+console.log('OK compaction group, skill surface, and package-export tool rows present')
 console.log('preset rows check: ALL PASS')

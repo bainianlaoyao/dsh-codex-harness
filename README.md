@@ -19,6 +19,11 @@
 - OpenAI Chat Completions 和 Responses API 路由。
 - `codex 工具模式` 预设：简短编码提示，`AGENTS.md` 指令加载，以及上述工具行。
 - `codex 创造模式` 预设：同一套 Codex 工具面，再叠官方创造模式（`cordis`）能力：`tool-cordis`、composition/plugin 技能、计划模式、目标、工作流与 ralph。
+- 两个预设都挂载 DSH 原生技能面（`skill-filesystem` + `tool-skill`）：本地技能目录
+  自动发现，会话目录里出现 `<available_skills>`，输入框的 `/` 菜单可以列出并插入
+  `/技能名`。技能注册表本身是 host 行，web 面会禁用它的本地发现与加载两行，所以任何
+  想用技能的预设都必须自己挂（`codex 工具模式` 在 0.3.3 之前漏了这两行，表现为
+  `/` 菜单空白、手打 `/name` 只是普通文本）。
 
 DSH 自己继续处理工作目录、运行时上下文、沙箱、审批、压缩和宿主工具。预设只
 替换工具面（codex 形状的终端与补丁工具），计划/提问/子代理等协作工具一律使用
@@ -137,4 +142,21 @@ E2E 只模拟模型目录；HTTP 通过 Playwright 路由桥接 Host handler，�
 npm test
 ```
 
-测试覆盖预设模块可加载性、preset 自动发布、保留工具的行为，以及两个 OpenAI 路由。历史上的完整 Codex 对齐研究保留在 `docs/`，不再是该插件的运行时契约。
+测试覆盖预设模块可加载性、preset 自动发布、保留工具的行为，以及两个 OpenAI 路由。两个预设各自的
+`agent-presets/*/check-rows.mjs` 还以文本断言守住"少了某一行就静默失去某个界面"这类回归：压缩组、
+Codex 工具行的包导出写法，以及技能面（`skill-filesystem` + `tool-skill`）。历史上的完整 Codex 对齐
+研究保留在 `docs/`，不再是该插件的运行时契约。
+
+**技能面缺失（0.3.3）**：`codex 工具模式` 的 composition 少挂了 `skill-filesystem` 与
+`tool-skill`。DSH 的技能注册表（`dsh-skill`）是 host 行，web 面把它下面的本地发现与加载两行
+`disabled: true`，改由每个预设自行挂载——`codex 创造模式` 一直是这么做的，`codex 工具模式` 漏了。
+后果是纯该预设的会话里没有任何技能面：没有 `skill` 工具、没有 `<available_skills>` 目录，web
+输入框的 `/` 列表走 `skills/list` 而该调用在注册表缺席时直接失败，所以菜单空白；手打 `/name`
+也只是普通文本，不会被解析成技能手势。修复即补齐这两行，`check-rows.mjs` 同步加断言。
+
+结构校验（会解析 YAML 并按行形状断言，比 `check-rows.mjs` 的纯文本断言更强；发布副本会被发布器改写成
+`file:` URL，这里两种写法都接受）：
+
+```bash
+node scripts/verify-presets.mjs "$DSH_HOME/.agent-presets"   # 仓库源 + 已发布的副本
+```

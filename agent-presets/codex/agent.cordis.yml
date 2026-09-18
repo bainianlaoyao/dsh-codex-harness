@@ -1,5 +1,9 @@
 # Lightweight Codex-shaped coding preset for DeepSeek Harness.
 # DSH remains responsible for sandboxing, approvals, context, and compaction.
+# Skills are the one DSH surface this preset must mount itself: the catalog and
+# the `/name` gesture live in `dsh-tool-skill`, and the web surface disables the
+# host-plane rows. Without them a session has no `skill` tool, no
+# `<available_skills>` catalog, and `/` in the composer lists nothing.
 
 - id: persona
   name: '@deepseek-ai/dsh-persona'
@@ -83,6 +87,24 @@
   config:
     fetch: false
     searchTimeoutMs: 60000
+
+# ── skills ──────────────────────────────────────────────────────────────────
+# The skill REGISTRY (`dsh-skill`) is a host-plane row that the web surface
+# keeps mounted, so both rows below register into THIS preset's layer of it and
+# need no realm. `skill-filesystem` contributes local-root discovery — the
+# project roots (`<projectRoot>/.dsh/skills`, `<projectRoot>/.agents/skills`)
+# and the user roots (`$DSH_HOME/skills`, `~/.agents/skills`) — and `tool-skill`
+# gives the agent the catalog plus the loader. Without them the session has no
+# skill surface at all: no `skill` tool, no catalog, and a `/` in the composer
+# that lists nothing, because the web menu resolves through `skills/list` and
+# that call fails when neither the preset nor the host composition mounts the
+# registry. `codex 创造模式` (codex-creative) has carried these two rows since it
+# started shipping skills; this preset was simply missing them.
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
 
 # ── compaction ──────────────────────────────────────────────────────────────
 # Native DSH compaction (manual `/compact` + auto pressure compaction) instead

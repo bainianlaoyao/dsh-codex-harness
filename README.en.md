@@ -29,6 +29,13 @@ selected as-is from a new DSH session.
 - The **Codex creative mode** preset: the same Codex tool surface plus the official
   creative-mode (`cordis`) capabilities — `tool-cordis`, composition/plugin skills,
   plan mode, goals, workflow and ralph.
+- Both presets mount the DSH-native skill surface (`skill-filesystem` + `tool-skill`):
+  local skill roots are discovered, the session catalog carries `<available_skills>`,
+  and the composer's `/` menu lists skills and inserts `/name`. The skill registry is a
+  host row whose discovery and loader rows the web surface disables, so every preset
+  that wants skills must mount them itself — **Codex tool mode** was missing both
+  before 0.3.3, which showed up as an empty `/` menu and a `/name` typed by hand that
+  stayed ordinary text.
 
 DSH itself keeps owning the working directory, runtime context, sandbox, approval,
 compaction and host tools. The presets replace only the tool surface (Codex-shaped
@@ -210,9 +217,32 @@ npm test
 ```
 
 The suite covers preset module loadability, automatic preset publishing, the
-behaviour of the retained tools, and both OpenAI routes. The historical full Codex
-alignment research is kept under `docs/` and is no longer part of this plugin's
-runtime contract.
+behaviour of the retained tools, and both OpenAI routes. Each preset's
+`agent-presets/*/check-rows.mjs` also asserts, as text, the rows whose absence
+silently removes a whole surface: the compaction group, the package-export form of
+the Codex tool rows, and the skill surface (`skill-filesystem` + `tool-skill`). The
+historical full Codex alignment research is kept under `docs/` and is no longer part
+of this plugin's runtime contract.
+
+### Missing skill surface (0.3.3)
+
+The **Codex tool mode** composition never mounted `skill-filesystem` or `tool-skill`.
+DSH's skill registry (`dsh-skill`) is a host row, and the web surface disables the
+discovery and loader rows beneath it (`disabled: true`) so that each preset mounts its
+own — the **Codex creative mode** preset has done exactly that for as long as it has
+shipped. A session on the plain preset therefore had no skill surface at all: no
+`skill` tool, no `<available_skills>` catalog, and a composer `/` menu that resolved
+through `skills/list` and failed outright while the registry was absent. Typing
+`/name` by hand stayed ordinary text, because nothing was listening for the gesture.
+The fix mounts both rows, and `check-rows.mjs` now guards them.
+
+For a structural check — it parses the YAML and asserts the shape of each row,
+which is stronger than the text assertions in `check-rows.mjs`, and accepts both the
+bare package specifier and the `file:` URL the publisher rewrites it to:
+
+```bash
+node scripts/verify-presets.mjs "$DSH_HOME/.agent-presets"   # repo sources + published copies
+```
 
 ## Related plugins
 
