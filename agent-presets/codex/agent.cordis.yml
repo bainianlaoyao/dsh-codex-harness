@@ -1,9 +1,14 @@
 # Lightweight Codex-shaped coding preset for DeepSeek Harness.
 # DSH remains responsible for sandboxing, approvals, context, and compaction.
-# Skills are the one DSH surface this preset must mount itself: the catalog and
-# the `/name` gesture live in `dsh-tool-skill`, and the web surface disables the
-# host-plane rows. Without them a session has no `skill` tool, no
-# `<available_skills>` catalog, and `/` in the composer lists nothing.
+#
+# Three DSH surfaces are mounted HERE rather than left to the host composition,
+# because the web surface disables its host-plane copies (`dsh-web-app` patch)
+# and a preset that omits them loses the surface silently:
+#   * skills — `skill-filesystem` + `tool-skill`: the `<available_skills>`
+#     catalog, the `skill` tool, and the `/` composer menu.
+#   * goals — `command-goal` + `tool-goal`: `/goal` and the `create_goal` /
+#     `get_goal` / `update_goal` tools.
+#   * compaction — the `compaction` group: `/compact` and auto-compaction.
 
 - id: persona
   name: '@deepseek-ai/dsh-persona'
@@ -77,6 +82,21 @@
 
 - id: codex-typed-subagents
   name: 'dsh-codex-mode/plugins/typed-subagents.js'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+# The web surface disables the host-plane `command-goal` / `tool-goal` rows
+# (`dsh-web-app` patch, same reason as the skill rows above), so a preset that
+# wants the goal surface MUST mount both itself. Without them the session has no
+# `create_goal` / `get_goal` / `update_goal` and no `/goal`: a long-running
+# objective can never be armed, and a session resumed after a restart has
+# nothing driving it. The goal service and session driver stay on the host
+# plane, where the Gateway can resolve them; these two rows register into THIS
+# preset's scoped layers.
+- id: command-goal
+  name: '@deepseek-ai/dsh-command-goal'
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
 
 # DSH-native web_search. The host `tool-web` row is disabled on the web
 # surface, so presets mount their own; the search provider resolves from the

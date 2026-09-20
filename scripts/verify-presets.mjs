@@ -13,6 +13,12 @@
  * plain `codex` preset shipped for months without them, so a session on it had
  * no skill surface at all — that regression is what these assertions guard.
  *
+ * The goal surface is the same failure class and is checked the same way: the
+ * web surface also disables the host-plane `command-goal` / `tool-goal` rows, so
+ * a preset without its own copies has no `/goal` and no `create_goal` /
+ * `get_goal` / `update_goal`. The plain `codex` preset shipped without them
+ * until 0.3.4.
+ *
  * js-yaml is a repo devDependency, so this file reads it from the repo; it is
  * intentionally NOT part of `npm test`'s published-layout checks. Both
  * `check-rows.mjs` files stay the dependency-free gate that `npm test` runs.
@@ -48,6 +54,7 @@ const PRESETS = [
     id: 'codex',
     displayName: 'codex 工具模式',
     skills: true,
+    goals: true,
     toolSpecifiers: [
       'dsh-codex-mode/plugins/typed-subagents.js',
       'dsh-codex-mode/plugins/tools/exec-command.js',
@@ -67,6 +74,7 @@ const PRESETS = [
     id: 'codex-creative',
     displayName: 'codex 创造模式',
     skills: true,
+    goals: true,
     toolSpecifiers: [
       'dsh-codex-mode/plugins/typed-subagents.js',
       'dsh-codex-mode/plugins/tools/exec-command.js',
@@ -177,6 +185,20 @@ const verifyFile = (label, path, preset) => {
       assert.equal(tool.name, '@deepseek-ai/dsh-tool-skill')
       assert.notEqual(filesystem.disabled, true, 'skill-filesystem is disabled')
       assert.notEqual(tool.disabled, true, 'tool-skill is disabled')
+    })
+  }
+
+  if (preset.goals) {
+    // Same failure class as the skill surface below.
+    check('goal surface is mounted (command-goal + tool-goal)', () => {
+      const command = findRow(rows, 'command-goal')
+      const tool = findRow(rows, 'tool-goal')
+      assert.ok(command !== undefined, 'missing command-goal row: no `/goal` command')
+      assert.ok(tool !== undefined, 'missing tool-goal row: no create_goal / get_goal / update_goal')
+      assert.equal(command.name, '@deepseek-ai/dsh-command-goal')
+      assert.equal(tool.name, '@deepseek-ai/dsh-tool-goal')
+      assert.notEqual(command.disabled, true, 'command-goal is disabled')
+      assert.notEqual(tool.disabled, true, 'tool-goal is disabled')
     })
   }
 

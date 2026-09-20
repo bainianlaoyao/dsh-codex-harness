@@ -25,7 +25,7 @@ selected as-is from a new DSH session.
   `interrupt_agent` / `list_agents`), and `web_search`.
 - OpenAI Chat Completions and Responses API routes.
 - The **Codex tool mode** preset: a short coding prompt, `AGENTS.md` instruction
-  loading, and the tool rows above.
+  loading, the tool rows above, and the DSH-native goal surface.
 - The **Codex creative mode** preset: the same Codex tool surface plus the official
   creative-mode (`cordis`) capabilities — `tool-cordis`, composition/plugin skills,
   plan mode, goals, workflow and ralph.
@@ -36,6 +36,11 @@ selected as-is from a new DSH session.
   that wants skills must mount them itself — **Codex tool mode** was missing both
   before 0.3.3, which showed up as an empty `/` menu and a `/name` typed by hand that
   stayed ordinary text.
+- Both presets mount the DSH-native goal surface (`command-goal` + `tool-goal`):
+  `/goal` plus the `create_goal` / `get_goal` / `update_goal` tools, which is what
+  makes a long-running objective keep running across goal rounds. The web surface
+  disables the host-plane copies of both rows for the same reason it disables the
+  skill rows, and **Codex tool mode** was missing them before 0.3.4.
 
 DSH itself keeps owning the working directory, runtime context, sandbox, approval,
 compaction and host tools. The presets replace only the tool surface (Codex-shaped
@@ -220,9 +225,10 @@ The suite covers preset module loadability, automatic preset publishing, the
 behaviour of the retained tools, and both OpenAI routes. Each preset's
 `agent-presets/*/check-rows.mjs` also asserts, as text, the rows whose absence
 silently removes a whole surface: the compaction group, the package-export form of
-the Codex tool rows, and the skill surface (`skill-filesystem` + `tool-skill`). The
-historical full Codex alignment research is kept under `docs/` and is no longer part
-of this plugin's runtime contract.
+the Codex tool rows, the skill surface (`skill-filesystem` + `tool-skill`), and the
+goal surface (`command-goal` + `tool-goal`). The historical full Codex alignment
+research is kept under `docs/` and is no longer part of this plugin's runtime
+contract.
 
 ### Missing skill surface (0.3.3)
 
@@ -235,6 +241,17 @@ shipped. A session on the plain preset therefore had no skill surface at all: no
 through `skills/list` and failed outright while the registry was absent. Typing
 `/name` by hand stayed ordinary text, because nothing was listening for the gesture.
 The fix mounts both rows, and `check-rows.mjs` now guards them.
+
+### Missing goal surface (0.3.4)
+
+The same class of regression, in the same preset: no `command-goal` and no `tool-goal`
+row. The `dsh-web-app` patch disables both host-plane rows, so a preset has to mount
+its own — a session on **Codex tool mode** had no `/goal` command and none of
+`create_goal` / `get_goal` / `update_goal`. A long-running request could therefore
+never be turned into a persisted goal, and nothing would continue it after the turn
+that described it, no matter how clearly the user asked for one. The fix mounts both
+rows, `check-rows.mjs` guards them, and `scripts/verify-presets.mjs` now asserts the
+goal surface structurally for both presets alongside the skill surface.
 
 For a structural check — it parses the YAML and asserts the shape of each row,
 which is stronger than the text assertions in `check-rows.mjs`, and accepts both the

@@ -16,6 +16,11 @@
  * the web surface disables the host-plane copies, so a preset that omits them
  * gets no `skill` tool, no `<available_skills>` catalog, and an empty menu.
  *
+ * And asserts the goal surface (`command-goal` + `tool-goal`) for the same
+ * reason: the web surface disables the host-plane goal rows too, so omitting
+ * them leaves the session with no `/goal` and no `create_goal` / `get_goal` /
+ * `update_goal` — a long-running objective can never be armed.
+ *
  * Usage: node check-rows.mjs  (from the preset directory)
  */
 import assert from 'node:assert/strict'
@@ -53,10 +58,14 @@ for (const needle of [
   'name: \'@deepseek-ai/dsh-skill-filesystem\'',
   'id: tool-skill',
   'name: \'@deepseek-ai/dsh-tool-skill\'',
+  'id: command-goal',
+  'name: \'@deepseek-ai/dsh-command-goal\'',
+  'id: tool-goal',
+  'name: \'@deepseek-ai/dsh-tool-goal\'',
   ...rows.map((specifier) => `name: '${specifier}'`),
 ]) {
   assert.ok(composition.includes(needle), `composition must include ${needle}`)
 }
 assert.equal(composition.includes('../../plugins/tools/'), false, 'composition must not use repo-relative plugin paths')
-console.log('OK compaction group, skill surface, and package-export tool rows present')
+console.log('OK compaction group, skill surface, goal surface, and package-export tool rows present')
 console.log('preset rows check: ALL PASS')
