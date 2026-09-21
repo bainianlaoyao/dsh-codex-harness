@@ -1,9 +1,25 @@
 # Goal rounds are admitted while the agent is only waiting on a job
 
 **Component:** `@deepseek-ai/dsh-goal-round-driver`, with `@deepseek-ai/dsh-tool-jobs` and a Codex-shaped exec surface
+**Upstream:** [`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness) — `packages/goal/goal-round-driver`. The npm metadata of both `@deepseek-ai/dsh` (`apps/cli`) and the driver package points there, but the repository **has issues disabled, accepts no external pull requests**, and routes bug reports to GitHub Discussions (`CONTRIBUTING.md`: *"Identify and report issues or bugs in GitHub Discussions"*, prioritised by upvote).
 **Observed on:** DSH `0.1.5-rc.1`, `dsh-goal-round-driver` `0.1.5-rc.2`, Windows
 **Severity:** goal round budget and session history are spent on waiting; a "round" stops meaning "progress"
-**Status:** draft issue — measured and reproducible, not yet filed
+**Status:** evidence package for the threads below — the defect is already reported, so this should be posted as a comment on an existing discussion, not as a new one
+
+## Already reported upstream — add evidence, do not re-file
+
+| Thread | Category | Opened | State |
+| --- | --- | --- | --- |
+| [#4664](https://github.com/deepseek-ai/deepseek-harness/discussions/4664) *"[Bug]？ goal 功能开启后 agent 无法被动等待后台任务：每次进入 idle 即被强制注入 `<goal_round>`，空转消耗轮次与 token"* | Q&A | 2026-08-26 | 1 upvote, 5 comments — same diagnosis as this document |
+| [#7198](https://github.com/deepseek-ai/deepseek-harness/discussions/7198) *"goal 续行缺少『无进展』与『等待中』判断：0.1.6-alpha.2 仍复现"* | Ideas | 2026-09-19 | 1 upvote, 3 comments — newest confirmation |
+| [#4715](https://github.com/deepseek-ai/deepseek-harness/discussions/4715) *"Goal rounds busy-loop while long-running subagents are still active"* | Ideas | 2026-08-27 | the subagent variant |
+| [#6169](https://github.com/deepseek-ai/deepseek-harness/discussions/6169) *"goal-round-driver 无时间节流：轮次按「回合结束」触发…"* | General | 2026-09-10 | no throttle between rounds |
+| [#6901](https://github.com/deepseek-ai/deepseek-harness/discussions/6901) *"Goal模式空转，亟需优化"* | Q&A | 2026-09-17 | 2 upvotes |
+| [#7193](https://github.com/deepseek-ai/deepseek-harness/discussions/7193) *"我挂机一晚上回来token全没了…"* | General | 2026-09-19 | 2 upvotes |
+
+What this document adds to those threads: the mechanism pinned to exact code and log records, a
+**cross-preset measurement** (which thread has the "why only some setups suffer" answer), and a
+read-only audit script that reproduces every number.
 
 ## Summary
 
