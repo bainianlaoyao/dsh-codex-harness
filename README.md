@@ -28,6 +28,8 @@
   `create_goal` / `get_goal` / `update_goal` 三个工具，这是长任务能跨轮继续执行的前提。
   web 面对这两行的 host 副本同样 `disabled: true`（原因与技能面一致），`codex 工具模式`
   在 0.3.4 之前漏了它们。
+- 两个预设的 persona 都写明**等待不是空闲**：每次 idle 都会被记为一轮 goal round，
+  为了等自己起的命令而交出 turn，等于把 goal 预算花在 `job_output` 等待上（见下文 0.3.5）。
 
 DSH 自己继续处理工作目录、运行时上下文、沙箱、审批、压缩和宿主工具。预设只
 替换工具面（codex 形状的终端与补丁工具），计划/提问/子代理等协作工具一律使用
@@ -164,9 +166,31 @@ Codex 工具行的包导出写法、技能面（`skill-filesystem` + `tool-skill
 被持久化的 goal，无论用户把要求说得多明确，都不会有后续的自动续跑轮次。修复即补齐这两行，
 `check-rows.mjs` 加文本断言，`scripts/verify-presets.mjs` 也把目标面纳入结构化断言（与技能面同级）。
 
+**等待不是空闲（0.3.5）**：goal 轮由 host 平面的 `dsh-goal-round-driver` 注入，判据只有
+`agent.status === "idle"`——它不问这个 agent 名下是否还有在跑的后台作业。codex 工具面把这一点放大：
+`exec_command` 10–30 s 就 yield，长命令一律变成后台 job，而 `dsh-tool-jobs` 的提示段（"job 完成会
+通知你，不要 busy-poll"）又把模型推向"结束 turn 去等"。结果是每次 `job_output(wait: true)` 超时返回、
+模型结束 turn，driver 立刻记为一轮 goal round——而新一轮唯一能做的事还是等同一个 job。
+实测某会话 18 次注入中 11 次（61%）是纯等待轮（首调用即 `job_output`/`write_stdin`），29 次
+turn 结束全部发生在 exec 会话仍在运行时；同期 `standard` 预设的 24 轮里等待轮为 **0**。
+0.3.5 的修法是在 persona 里写明"等待不是空闲"：自己起的命令还在跑时，为等它结束而交出 turn 会
+直接烧掉一轮 goal 预算，应在同一 turn 内轮询（`job_output(wait: true)` / `write_stdin`）到作业结束。
+上游 driver 的正解（idle 判据应排除未结束的后台作业）见 issue 草稿
+`docs/upstream/2026-09-21-goal-round-driver-pending-jobs.md`，复现用 `scripts/goal-round-audit.mjs`，
+两个 `check-rows.mjs` 都加了这条 persona 断言的守卫。
+
 结构校验（会解析 YAML 并按行形状断言，比 `check-rows.mjs` 的纯文本断言更强；发布副本会被发布器改写成
 `file:` URL，这里两种写法都接受）：
 
 ```bash
 node scripts/verify-presets.mjs "$DSH_HOME/.agent-presets"   # 仓库源 + 已发布的副本
+```
+
+goal 注入审计（只读，遍历 `$DSH_HOME/sessions` 的 zstd 会话日志，按 effective preset 统计轮数、
+纯等待轮数，以及"turn 结束时 exec 会话仍在运行"的次数；`agent-preset/selected` 与 header 不一致的
+会话按前者归类）：
+
+```bash
+node scripts/goal-round-audit.mjs                     # 全部会话 + 分预设汇总
+node scripts/goal-round-audit.mjs --session 743812d8  # 单会话逐轮明细
 ```

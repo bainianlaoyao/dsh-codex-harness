@@ -41,6 +41,9 @@ selected as-is from a new DSH session.
   makes a long-running objective keep running across goal rounds. The web surface
   disables the host-plane copies of both rows for the same reason it disables the
   skill rows, and **Codex tool mode** was missing them before 0.3.4.
+- Both presets' personas state that **waiting is not idleness**: a goal round is admitted
+  on every idle transition, so handing the turn back to wait for a command you started
+  spends the goal's round budget on `job_output` waits (see 0.3.5 below).
 
 DSH itself keeps owning the working directory, runtime context, sandbox, approval,
 compaction and host tools. The presets replace only the tool surface (Codex-shaped
@@ -253,12 +256,43 @@ that described it, no matter how clearly the user asked for one. The fix mounts 
 rows, `check-rows.mjs` guards them, and `scripts/verify-presets.mjs` now asserts the
 goal surface structurally for both presets alongside the skill surface.
 
+### Waiting is not idleness (0.3.5)
+
+A goal round is admitted by the host-plane `dsh-goal-round-driver` on one condition:
+`agent.status === "idle"`. It never asks whether that agent still owns running work, and a
+Codex-shaped tool surface makes that gap expensive. `exec_command` yields a still-running
+command after 10–30 s, so any longer command becomes a background job; the `dsh-tool-jobs`
+prompt section then tells the model not to busy-poll because it will be notified when the job
+finishes, so the model ends its turn to wait — and every such turn end is read as idleness, so
+the driver immediately admits a round whose only productive action is another
+`job_output({ wait: true })`. Measured on one live session: 18 injections, 11 of them (61%) pure
+wait rounds, and 29 of 29 turn ends with an exec session still running; over the same period the
+**standard** preset's 24 rounds contained **zero** wait rounds.
+
+0.3.5 states the rule in both Codex personas: while a command or job you started is still
+running, do not hand the turn back just to wait for it — keep the turn alive by polling until
+the work settles, because ending a turn with an active goal spends a round of the goal's budget
+on waiting. The structural fix belongs upstream (the idle gate should exclude an agent's
+unfinished background work); the measured case, the cross-preset comparison, and the proposed
+fixes are written up in `docs/upstream/2026-09-21-goal-round-driver-pending-jobs.md`, and
+`scripts/goal-round-audit.mjs` reproduces every number in it from the local session store.
+
 For a structural check — it parses the YAML and asserts the shape of each row,
 which is stronger than the text assertions in `check-rows.mjs`, and accepts both the
 bare package specifier and the `file:` URL the publisher rewrites it to:
 
 ```bash
 node scripts/verify-presets.mjs "$DSH_HOME/.agent-presets"   # repo sources + published copies
+```
+
+For the goal-round audit — read-only, walks `$DSH_HOME/sessions`, decodes the concatenated-zstd
+logs, and reports rounds, pure-wait rounds, and turn ends that left an exec session running, per
+effective preset (a session switched mid-life is grouped by `agent-preset/selected`, not by its
+header):
+
+```bash
+node scripts/goal-round-audit.mjs                     # every session + per-preset summary
+node scripts/goal-round-audit.mjs --session 743812d8  # one session, round by round
 ```
 
 ## Related plugins

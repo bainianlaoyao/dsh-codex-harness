@@ -65,5 +65,17 @@ assert.equal(composition.includes("name: '@deepseek-ai/dsh-tool-fs'"), false, 'c
 
 await access(join(presetDir, 'skills', 'editing-cordis-compositions', 'SKILL.md'))
 await access(join(presetDir, 'skills', 'cordis-plugin-development', 'SKILL.md'))
+
+// Same wait rule as the plain preset: this composition reaches the goal-round
+// driver through the same `exec_command` surface, and it adds more ways to leave
+// work in flight (subagents, workflows, ralph). See
+// docs/upstream/2026-09-21-goal-round-driver-pending-jobs.md.
+for (const needle of [
+  'Waiting is not idleness',
+  'do not end your turn just to wait for it',
+]) {
+  assert.ok(composition.includes(needle), `persona must include ${needle}`)
+}
+console.log('OK persona states that waiting on running work is not idleness')
 console.log('OK compaction, cordis creative extras, skills, and package-export tool rows present')
 console.log('preset rows check: ALL PASS')

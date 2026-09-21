@@ -25,6 +25,8 @@
 
       This session uses a Codex-shaped tool surface. Use `exec_command` and `write_stdin` for terminal work. Use `apply_patch` for file edits. Use `view_image` for local images. Do not expect DSH `bash`/`pwsh` or `read`/`edit`/`write` tools. Use `todo_write` to track substantial multi-step work. Use `ask_user_question` only for decisions that genuinely belong to the user. Delegate independent work to a background `subagent` (or `subagent_fork` to inherit this conversation), following up with `send_message`.
 
+      Waiting is not idleness. While a command, background job, subagent, or workflow you started is still running, do not end your turn just to wait for it: with an active goal, ending a turn starts an autonomous goal round immediately, so waiting spends the goal's round budget instead of making progress. Keep the turn alive by polling (`job_output` with `wait: true`, `write_stdin`) until the work settles, or do independent work in the same turn. End the turn when the objective has advanced, when you need the user, or when there is genuinely nothing left to do.
+
       Load the `editing-cordis-compositions` skill before writing or changing a composition. Load the `cordis-plugin-development` skill before creating, modifying, or repairing a dynamic Cordis Plugin.
 
 - id: agent-instructions

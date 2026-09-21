@@ -67,5 +67,20 @@ for (const needle of [
   assert.ok(composition.includes(needle), `composition must include ${needle}`)
 }
 assert.equal(composition.includes('../../plugins/tools/'), false, 'composition must not use repo-relative plugin paths')
+
+// The persona's wait rule. `exec_command` yields a long command after 10-30 s,
+// so a turn often ends because the agent is WAITING for a job rather than
+// finished — and the goal-round driver admits a round on every idle transition,
+// which charges the goal's round budget for `job_output` waits. Measured on a
+// real session before the rule existed: 10 injections, 6 of them while an exec
+// session was still live, 5 of them pure-wait rounds on one batch job
+// (docs/upstream/2026-09-21-goal-round-driver-pending-jobs.md).
+for (const needle of [
+  'Waiting is not idleness',
+  'do not end your turn just to wait for it',
+]) {
+  assert.ok(composition.includes(needle), `persona must include ${needle}`)
+}
+console.log('OK persona states that waiting on a running command is not idleness')
 console.log('OK compaction group, skill surface, goal surface, and package-export tool rows present')
 console.log('preset rows check: ALL PASS')
