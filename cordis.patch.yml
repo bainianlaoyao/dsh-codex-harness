@@ -35,6 +35,9 @@
 # — is mounted by BARE PACKAGE NAME and is the single row that composes
 # plugins/client.js (设置 → Codex 子代理).
 - insert:
+    - id: codex-context-web
+      name: 'dsh-codex-mode/plugins/context/context-web.js'
+
     # Keep child preset restoration available even when a cold continuation
     # originates from a parent which does not mount the Codex tool adapter.
     - id: codex-typed-subagent-presets

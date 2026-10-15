@@ -51,7 +51,7 @@ for (const specifier of rows) {
 const composition = await readFile(join(presetDir, 'agent.cordis.yml'), 'utf8')
 for (const needle of [
   'id: compaction',
-  'name: \'@deepseek-ai/dsh-compaction-basic\'',
+  'name: \'dsh-codex-mode/plugins/harness/codex-context-compaction.js\'',
   'name: \'@deepseek-ai/dsh-command-compact\'',
   'name: \'@deepseek-ai/dsh-compaction-tool-result-pruner\'',
   'id: skill-filesystem',

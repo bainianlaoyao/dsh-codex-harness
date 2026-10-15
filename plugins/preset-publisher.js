@@ -37,6 +37,9 @@ const MARKER_FILE = '.dsh-codex-mode-published'
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const TOOL_EXPORTS = {
+  'dsh-codex-mode/plugins/context/context-mode.js': 'plugins/context/context-mode.js',
+  'dsh-codex-mode/plugins/context/context-tools.js': 'plugins/context/context-tools.js',
+  'dsh-codex-mode/plugins/harness/codex-context-compaction.js': 'plugins/harness/codex-context-compaction.js',
   'dsh-codex-mode/plugins/typed-subagents.js': 'plugins/typed-subagents.js',
   'dsh-codex-mode/plugins/tools/restrict.js': 'plugins/tools/restrict.js',
   'dsh-codex-mode/plugins/tools/exec-command.js': 'plugins/tools/exec-command.js',

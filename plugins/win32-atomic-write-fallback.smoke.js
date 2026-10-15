@@ -143,8 +143,8 @@ if (fsLocal !== undefined && process.platform === 'win32') {
     await rm(ntfsDir, { recursive: true, force: true })
   }
 
-  const refsDir = 'E:\\texus\\src\\poker_parser'
-  if (existsSync(refsDir)) {
+  const refsDir = process.env.DSH_TEST_REFS_DIR
+  if (refsDir && existsSync(refsDir)) {
     const probe = join(refsDir, `__win32_atomic_probe_${process.pid}.txt`)
     await writeFile(probe, 'old\n')
     try {

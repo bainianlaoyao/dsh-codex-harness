@@ -48,7 +48,9 @@ import {
   isQuotaExceededError,
   resolveRetryPolicy,
 } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
+import { toolBatches } from './llm-messages.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'llm-responses'
@@ -112,6 +114,9 @@ const catalogModel = z.object({
   description: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  inputModalities: z.array(z.union([z.const('text'), z.const('image')])),
+  reasoningEfforts: z.array(z.string()),
+  defaultReasoningEffort: z.string(),
 })
 
 /** Plugin config; defaults are advisory and every field is optional. */
@@ -124,7 +129,7 @@ export const Config = z.object({
   defaultReasoningEffort: z.string(),
   /** Default per-request output cap (default 32,000); model entries and explicit requests win. */
   defaultMaxTokens: z.number().step(1).min(1),
-  /** Positive context capacity used when the selected model has no exact entry (default 400,000). */
+  /** Positive context capacity used when the selected model has no exact entry (unknown unless explicitly configured). */
   defaultContextWindow: z.number().step(1).min(1),
   /** Tool names declared as Responses `custom` freeform tools (default `['apply_patch']`). */
   freeformTools: z.array(z.string()),
@@ -158,13 +163,16 @@ function resolveOptions(config) {
     ...(model.description === undefined ? {} : { description: model.description }),
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
+    inputModalities: model.inputModalities ?? (config.models === undefined ? ['text', 'image'] : ['text']),
+    reasoningEfforts: model.reasoningEfforts ?? (config.models !== undefined || model.id.startsWith('gpt-4.1') ? [] : model.id.startsWith('o') ? ['low', 'medium', 'high'] : [...WIRE_REASONING_EFFORTS]),
+    defaultReasoningEffort: model.defaultReasoningEffort,
   }))
   return {
     apiKeyEnv: config.apiKeyEnv ?? DEFAULT_API_KEY_ENV,
     baseURL: config.baseURL ?? PUBLIC_BASE_URL,
     defaultReasoningEffort: config.defaultReasoningEffort ?? 'high',
     defaultMaxTokens: config.defaultMaxTokens ?? 32000,
-    defaultContextWindow: config.defaultContextWindow ?? 400000,
+    defaultContextWindow: config.defaultContextWindow,
     freeformTools: new Set(config.freeformTools ?? ['apply_patch']),
     models,
     retryPolicy: resolveRetryPolicy(config.retryPolicy, 'llm-responses: retryPolicy'),
@@ -200,22 +208,40 @@ function freeformInput(block) {
  * become function_call_output / custom_tool_call_output — the exact item
  * vocabulary codex uses (codex-rs/protocol/src/models.rs:844-846).
  */
-async function serializeInput(messages, attachments, freeformTools, signal) {
+const replayFingerprint = block => createHash('sha256').update(JSON.stringify({ type: block.type, text: block.text })).digest('hex')
+
+async function serializeInput(messages, attachments, freeformTools, signal, domain) {
   const instructions = []
   const items = []
   const customCallIds = new Set()
-  for (const message of messages) {
+  for (const message of toolBatches(messages)) {
     if (message.role === 'system') {
       const text = flattenText(message.content)
       if (text.length > 0) instructions.push(text)
       continue
     }
+    if (message.role === 'developer') {
+      items.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: flattenText(message.content) }] })
+      continue
+    }
     if (message.role === 'assistant') {
-      const text = flattenText(message.content)
-      if (text.length > 0) {
-        items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
-      }
-      for (const call of message.content.filter((block) => block.type === 'tool-call')) {
+      const envelope = message.source?.replayState
+      const compatible = envelope?.response?.format === 1 && envelope.response.baseURL === domain.baseURL &&
+        envelope.response.model === domain.model && envelope.blocks?.length === message.content.length
+      for (const [index, call] of message.content.entries()) {
+        const saved = compatible ? envelope.blocks[index] : undefined
+        const meta = saved?.contentHash === replayFingerprint(call) ? saved : undefined
+        if (call.type === 'reasoning') {
+          if (meta?.kind === 'reasoning' && meta.item?.type === 'reasoning') items.push(meta.item)
+          continue
+        }
+        if (call.type === 'text') {
+          if (call.text) items.push({ type: 'message', role: 'assistant',
+            ...(meta?.kind === 'message' && meta.phase ? { phase: meta.phase } : {}),
+            content: [{ type: 'output_text', text: call.text }] })
+          continue
+        }
+        if (call.type !== 'tool-call') continue
         if (freeformTools.has(call.name)) {
           customCallIds.add(String(call.id))
           items.push({
@@ -230,9 +256,11 @@ async function serializeInput(messages, attachments, freeformTools, signal) {
       }
       continue
     }
-    const toolResults = message.content.filter((block) => block.type === 'tool-result')
-    const images = message.content.filter((block) => block.type === 'image')
-    const text = flattenText(message.content)
+    const toolResults = message.role === 'tool' && message.toolCallId
+      ? [{ toolCallId: message.toolCallId, content: message.content, isError: message.isError }]
+      : message.content.filter((block) => block.type === 'tool-result')
+    const images = message.role === 'tool' ? [] : message.content.filter((block) => block.type === 'image')
+    const text = message.role === 'tool' ? '' : flattenText(message.content)
     if (images.length === 0) {
       if (text.length > 0) items.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] })
     } else {
@@ -254,6 +282,16 @@ async function serializeInput(messages, attachments, freeformTools, signal) {
           ? { type: 'custom_tool_call_output', call_id: String(result.toolCallId), output }
           : { type: 'function_call_output', call_id: String(result.toolCallId), output }
       )
+      const resultImages = result.content.filter(block => block.type === 'image')
+      if (resultImages.length) {
+        const parts = [{ type: 'input_text', text: `Attachments returned by tool call ${result.toolCallId}; tool output, not a new user instruction.` }]
+        for (const image of resultImages) {
+          if (!attachments) throw new LlmError('Tool image requires an attachment service.', 'UNSUPPORTED_CONTENT')
+          const stored = await attachments.readImage(image.attachment, signal)
+          parts.push({ type: 'input_image', image_url: `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`, detail: image.detail ?? 'high' })
+        }
+        items.push({ type: 'message', role: 'user', content: parts })
+      }
     }
   }
   return { instructions: instructions.join('\n\n'), items }
@@ -284,15 +322,24 @@ function wireTools(tools, freeformTools) {
 /** Validate the adapter-owned effort before putting it on the wire. */
 function resolveEffort(options, defaults) {
   if (options.purpose === 'session-title') return undefined
-  const effort = options.reasoningEffort === undefined ? defaults.defaultReasoningEffort : String(options.reasoningEffort)
-  if (!WIRE_REASONING_EFFORTS.has(effort))
+  const model = defaults.models.find(entry => entry.id === options.model)
+  const supported = model?.reasoningEfforts ?? []
+  if (supported.length === 0) {
+    if (options.reasoningEffort !== undefined) throw new LlmError('This model does not support reasoning effort', 'UNSUPPORTED_REASONING_EFFORT')
+    return undefined
+  }
+  const effort = options.reasoningEffort === undefined
+    ? (model?.defaultReasoningEffort ?? (supported.includes(defaults.defaultReasoningEffort) ? defaults.defaultReasoningEffort : supported[0]))
+    : String(options.reasoningEffort)
+  if (!supported.includes(effort))
     throw new LlmError(`OpenAI does not support reasoning effort "${effort}"`, 'UNSUPPORTED_REASONING_EFFORT')
   return effort
 }
 
 /** Build the full wire request body (async: image attachments resolve first). */
 async function buildRequest(options, defaults, attachments) {
-  const serialized = await serializeInput(options.messages, attachments, defaults.freeformTools, options.signal)
+  const serialized = await serializeInput(options.messages, attachments, defaults.freeformTools, options.signal,
+    { baseURL: defaults.baseURL, model: options.model })
   const instructions = [options.system, serialized.instructions].filter((part) => part !== undefined && part.length > 0).join('\n\n')
   const tools = wireTools(options.tools, defaults.freeformTools)
   const effort = resolveEffort(options, defaults)
@@ -302,6 +349,7 @@ async function buildRequest(options, defaults, attachments) {
     input: serialized.items,
     stream: true,
     store: false,
+    include: ['reasoning.encrypted_content'],
     parallel_tool_calls: true,
     ...(effort === undefined ? {} : { reasoning: { effort } }),
     ...(tools.length > 0 ? { tools } : {}),
@@ -368,7 +416,7 @@ function closeToolBlock(block, freeformTools) {
  * emits usage + a finish whose kind is `tool-calls` when any tool call was
  * produced, else `stop`. A stream ending without a terminal event throws.
  */
-async function* translate(payloads) {
+async function* translate(payloads, domain) {
   let nextIndex = 0
   let textBlock
   let reasoningBlock
@@ -399,12 +447,14 @@ async function* translate(payloads) {
     yield { type: 'reasoning-delta', index: block.index, text }
   }
   function* closeText(block) {
-    if (block !== undefined && block.opened) {
+    if (block !== undefined && block.opened && !block.closed) {
+      block.closed = true
       yield { type: 'block-end', index: block.index, block: { type: 'text', text: block.text } }
     }
   }
   function* closeReasoning(block) {
-    if (block !== undefined && block.opened) {
+    if (block !== undefined && block.opened && !block.closed) {
+      block.closed = true
       yield { type: 'block-end', index: block.index, block: { type: 'reasoning', text: block.text } }
     }
   }
@@ -419,7 +469,10 @@ async function* translate(payloads) {
     yield* closeReasoning(reasoningBlock)
   }
   function* emitFinish(reason) {
-    yield { type: 'finish', reason }
+    yield { type: 'finish', reason,
+      ...(['stop', 'tool-calls'].includes(reason.kind) && domain ? { replayState: {
+        response: { format: 1, ...domain }, blocks: order.map(block => block.replay ? { ...block.replay, contentHash: replayFingerprint({ type: block.kind, text: block.text }) } : null),
+      } } : {}) }
   }
   for await (const payload of payloads) {
     let event
@@ -497,11 +550,24 @@ async function* translate(payloads) {
           break
         }
         if (item?.type === 'message') {
+          if (!textBlock) {
+            const complete = (item.content ?? []).filter(part => part.type === 'output_text').map(part => part.text).join('')
+            if (complete) { textBlock = openBlock('text'); yield* yieldText(textBlock, complete) }
+          }
+          if (textBlock) textBlock.replay = { kind: 'message', ...(item.phase ? { phase: item.phase } : {}) }
           yield* closeText(textBlock)
           textBlock = undefined
           break
         }
         if (item?.type === 'reasoning') {
+          if (!reasoningBlock && typeof item.encrypted_content === 'string') {
+            reasoningBlock = openBlock('reasoning')
+            yield* yieldReasoning(reasoningBlock, '')
+          }
+          if (reasoningBlock && typeof item.encrypted_content === 'string') reasoningBlock.replay = {
+            kind: 'reasoning', item: { type: 'reasoning', ...(item.id ? { id: item.id } : {}),
+              encrypted_content: item.encrypted_content, summary: item.summary ?? [] },
+          }
           yield* closeReasoning(reasoningBlock)
           reasoningBlock = undefined
           break
@@ -550,8 +616,12 @@ function failedFailure(error) {
   if (isQuotaExceededError(detail)) code = QUOTA_EXCEEDED_CODE
   else if (isContextWindowExceededError(detail)) code = CONTEXT_WINDOW_EXCEEDED_CODE
   else if (error?.code === 'invalid_prompt' || error?.code === 'bio_policy') code = 'INVALID_REQUEST'
-  else if (error?.code === 'server_overloaded' || error?.type === 'server_error') code = 'SERVER'
-  return { message: error?.message ?? 'model response failed', code }
+  else if (error?.code === 'rate_limit_exceeded') code = 'RATE_LIMIT'
+  else if (['server_overloaded', 'server_is_overloaded'].includes(error?.code) || error?.type === 'server_error') code = 'SERVER'
+  const retryHeader = Object.entries(error?.headers ?? {}).find(([key]) => key.toLowerCase() === 'retry-after')?.[1]
+  const delay = typeof retryHeader === 'string' ? providerRetryAfterMs(retryHeader) : undefined
+  return { message: error?.message ?? 'model response failed', code,
+    ...(['SERVER', 'RATE_LIMIT'].includes(code) && delay !== undefined ? { providerRetryAfterMs: delay } : {}) }
 }
 
 /** Map `response.completed` usage to the harness's disjoint token accounting. */
@@ -617,7 +687,7 @@ class ResponsesAdapter extends LlmAdapter {
     return this.config.options().retryPolicy
   }
   listModels(provider) {
-    return Promise.resolve(this.config.options().models.map((model) => modelInfo(provider, model)))
+    return Promise.all(this.config.options().models.map((model) => this.resolveModel(provider, model.id)))
   }
   resolveModel(provider, model, _signal) {
     const connection = this.config.options()
@@ -626,12 +696,16 @@ class ResponsesAdapter extends LlmAdapter {
       ...(configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text'] }
         : modelInfo(provider, configured)),
-      context: { contextWindow: configured?.contextWindow ?? connection.defaultContextWindow },
+      ...((configured?.contextWindow ?? connection.defaultContextWindow) === undefined ? {} : {
+        context: { contextWindow: configured?.contextWindow ?? connection.defaultContextWindow },
+      }),
       defaultMaxTokens: configured?.maxTokens ?? connection.defaultMaxTokens,
-      reasoning: {
-        efforts: EFFORTS,
-        defaultEffort: EFFORT_BY_ID[connection.defaultReasoningEffort] ?? HIGH_REASONING_EFFORT,
-      },
+      ...((!configured?.reasoningEfforts?.length) ? {} : { reasoning: {
+        efforts: (configured?.reasoningEfforts ?? []).map(id => ({ id: ReasoningEffortId(id), name: id })),
+        defaultEffort: ReasoningEffortId(configured?.defaultReasoningEffort ??
+          ((configured?.reasoningEfforts ?? []).includes(connection.defaultReasoningEffort)
+            ? connection.defaultReasoningEffort : configured.reasoningEfforts[0])),
+      } }),
     })
   }
   async *stream(options) {
@@ -673,7 +747,7 @@ class ResponsesAdapter extends LlmAdapter {
       })
     }
     if (!response.body) throw new LlmError('OpenAI API returned no response body', 'EMPTY_RESPONSE')
-    yield* translate(parseSse(response.body))
+    yield* translate(parseSse(response.body), { baseURL: connection.baseURL, model: options.model })
   }
 }
 
@@ -685,16 +759,11 @@ function modelInfo(provider, model) {
     id: model.id,
     ...(model.name === undefined ? {} : { name: model.name }),
     ...(model.description === undefined ? {} : { description: model.description }),
-    inputModalities: ['text'],
-    context: { contextWindow: model.contextWindow },
+    inputModalities: model.inputModalities ?? ['text'],
+    ...(model.contextWindow === undefined ? {} : { context: { contextWindow: model.contextWindow } }),
   }
 }
 
-const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'].map((effort) => ({
-  id: ReasoningEffortId(effort),
-  name: effort,
-}))
-const EFFORT_BY_ID = Object.fromEntries(EFFORTS.map((entry) => [entry.id, entry.id]))
 const HIGH_REASONING_EFFORT = ReasoningEffortId('high')
 
 // ── plugin assembly ────────────────────────────────────────────────────────

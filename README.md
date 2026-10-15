@@ -16,7 +16,8 @@
 - `win32-atomic-write-fallback`：Windows host 行。ReFS / 无 WRITE_DAC 的 ACL 上，官方原子写的 `SetFileSecurityW` 会 EACCES；此行回退到 `rename`，`apply_patch` / `write` / `edit` 才能落盘。
 - `view_image`：本地图片查看。
 - DSH 原生工具：计划 `todo_write`、提问 `ask_user_question`、子代理 `subagent` / `subagent_fork`（+ `send_message` / `interrupt_agent` / `list_agents`）、`web_search`。
-- OpenAI Chat Completions 和 Responses API 路由。
+- OpenAI Chat Completions 和 Responses API 路由，保留工具图片、开发者消息与兼容的 Responses 推理状态。
+- 新建 `codex` 会话支持 Notes：持久交接、同会话切窗、分页回读与只读上下文面板；压缩与恢复复用 DSH 原生能力。
 - `codex 工具模式` 预设：简短编码提示，`AGENTS.md` 指令加载，上述工具行，以及 DSH 原生目标面。
 - `codex 创造模式` 预设：同一套 Codex 工具面，再叠官方创造模式（`cordis`）能力：`tool-cordis`、composition/plugin 技能、计划模式、目标、工作流与 ralph。
 - 两个预设都挂载 DSH 原生技能面（`skill-filesystem` + `tool-skill`）：本地技能目录
@@ -194,3 +195,18 @@ goal 注入审计（只读，遍历 `$DSH_HOME/sessions` 的 zstd 会话日志�
 node scripts/goal-round-audit.mjs                     # 全部会话 + 分预设汇总
 node scripts/goal-round-audit.mjs --session 743812d8  # 单会话逐轮明细
 ```
+
+## Notes 与模型上下文对齐（2026-10-15）
+
+新建 `codex` 会话启用 Notes；旧会话继续原生摘要，`codex-creative` 保持原有压缩方式。DSH 仍负责会话、工具批次、agent 调度、权限、token 计量和恢复。
+
+- 模型调用 `write_context_note` 或 `append_context_note` 持久化交接，再用返回的 revision 调用 `new_context`。请求在本批工具闭合后的步骤执行；返回 requested 不代表已提交。
+- 切窗只替换 Note 对应模型请求已见的安全前缀；后来的工具结果和用户纠正保留。Chat 原始历史不删除。新窗口只注入定位提示，模型用 `read_context_note` 分页读取正文。
+- `get_context_remaining` 使用最近已记录模型路由与 DSH token meter，明确是估算。未知容量不伪造 400k；换模型后的实际溢出交给 DSH 恢复。没有新 Note 时压力压缩和 `/compact` 使用原生摘要，成功后撤销旧 Note 的活跃资格。
+- `read_context_history`、`list_context_windows` 有界分页，只访问本会话。历史不是新授权。Note 存于 `$DSH_HOME/codex-context`（测试可用 `DSH_CODEX_CONTEXT_DIR`）；不可变内容加原子 manifest，窗口由 DSH replacement 日志恢复。
+- 右侧上下文面板只读、按需分页，更新复用 DSH session projection。浏览面板不会改变模型的 Note 阅读状态。
+- Responses 保留兼容 endpoint/model 的 opaque reasoning 与 phase，按原始 block 指纹校验；裁剪或修改过的块不恢复旧状态。两种协议都保留工具图片与 developer 角色，支持 DSH 新旧工具结果形状。模型配置可声明 `inputModalities`、`reasoningEfforts`、`defaultReasoningEffort`、`contextWindow`。
+
+AGENTS 继续采用 DSH 原生 baseline/local 叠加语义，不声称等同于 Codex 的整文件 override 替换。编辑前检查目标目录指令由 persona 明确提示；没有复制一套指令 loader、终端 UI 或 agent scheduler。
+
+验证：`npm run test:context`、`node plugins/llm-alignment.smoke.js`；完整回归用 `npm run test:isolated`。隔离脚本复制源码到临时目录并引用同一依赖树，不改变现有 node_modules 链接；`DSH_TEST_DEPENDENCIES` 可指定依赖树。本机原目录混用 0.1.5/0.2，直接 `npm test` 的旧 agent 测试会受 SettingsProvider/原生接口变化影响；完整支持基线仍是 package.json 声明的 0.1.5，未宣称整个插件已迁移到 0.2。

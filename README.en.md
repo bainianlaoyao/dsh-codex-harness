@@ -24,6 +24,8 @@ selected as-is from a new DSH session.
   subagents (`subagent` / `subagent_fork`, plus `send_message` /
   `interrupt_agent` / `list_agents`), and `web_search`.
 - OpenAI Chat Completions and Responses API routes.
+- Notes context handoff for new Codex tool-mode sessions: persistent revisions,
+  safe context-window resets, paged retrieval and a read-only context panel.
 - The **Codex tool mode** preset: a short coding prompt, `AGENTS.md` instruction
   loading, the tool rows above, and the DSH-native goal surface.
 - The **Codex creative mode** preset: the same Codex tool surface plus the official
@@ -58,6 +60,31 @@ the official creative mode, avoiding `Service is already registered`.
 ```sh
 dsh plugin --profile web add dsh-codex-mode
 ```
+
+## Notes and model context in 0.4.0
+
+Write a handoff with `write_context_note` or `append_context_note`, then call
+`new_context` with the returned revision. DSH finishes the current tool batch
+before replacing only the balanced history prefix covered by that Note. Later
+tool results and user corrections remain visible, and the original Chat history
+stays in the session log. The next window receives a locator; the model restores
+the handoff through `read_context_note` in bounded pages.
+
+Budget reports use DSH's token meter and latest recorded model route. They are
+estimates; model changes use native overflow recovery. Unknown capacities are
+not assigned a fabricated default. Without a fresh Note, native summary
+compaction remains available. Existing sessions and Codex creative mode retain
+their native compaction behavior.
+
+Both model routes preserve developer messages and images returned by tools.
+Responses also preserves compatible encrypted reasoning and assistant phase;
+replay is checked against the endpoint, model and content fingerprint. Custom
+models can declare their input modalities, reasoning efforts and context window.
+
+The supported full-plugin baseline remains DSH 0.1.5-rc.1. Run
+`npm run test:isolated` for a consistent dependency tree. The Notes and protocol
+paths have also been tested against the local DSH 0.2.0-rc.2 runtime; this is not
+a claim that all existing plugin integrations support DSH 0.2.
 
 From a local checkout instead:
 

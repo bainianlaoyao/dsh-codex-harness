@@ -1,26 +1,13 @@
-/**
- * Smoke test for dsh-codex/tools/restrict.js — asserts the codex tool-surface
- * restriction denies exactly the host-global `bash` tool.
- *
- * Usage: node dsh-codex/tools/restrict.smoke.js  (from the profile root)
- */
 import assert from 'node:assert/strict'
-
-const restrictions = []
-const ctx = {
-  tools: {
-    restrict(filter) {
-      restrictions.push(filter)
-      return () => {}
-    },
-  },
+import { apply } from './restrict.js'
+for (const available of [true, false]) {
+  const restrictions = []
+  let assemble
+  apply({ tools: { view: () => ({ restrictableNames: new Set(available ? ['bash'] : []) }), restrict: value => restrictions.push(value) }, on: (_name, fn) => { assemble = fn } })
+  assert.deepEqual(restrictions, available ? [{ deny: ['bash'] }] : [])
+  const assembly = { tools: [], sections: [{ name: 'tool:bash' }, { name: 'other' }] }
+  assert.deepEqual((await assemble(assembly, {}, async () => assembly)).sections, [{ name: 'other' }])
+  assembly.tools.push({ name: 'bash' })
+  assert.equal(await assemble(assembly, {}, async () => assembly), assembly)
 }
-
-const { apply, name, inject } = await import('./restrict.js')
-assert.equal(name, 'tool-codex-restrict')
-assert.deepEqual(inject, ['tools'])
-apply(ctx, {})
-assert.equal(restrictions.length, 1, 'one restriction registered')
-assert.deepEqual(restrictions[0].deny, ['bash'], 'denies exactly the host-global bash tool')
-
-console.log('restrict smoke test: ALL PASS')
+console.log('restrict: absent shell, scoped deny and matching guidance PASS')

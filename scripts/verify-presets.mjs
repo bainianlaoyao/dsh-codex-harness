@@ -56,6 +56,8 @@ const PRESETS = [
     skills: true,
     goals: true,
     toolSpecifiers: [
+      'dsh-codex-mode/plugins/context/context-mode.js',
+      'dsh-codex-mode/plugins/context/context-tools.js',
       'dsh-codex-mode/plugins/typed-subagents.js',
       'dsh-codex-mode/plugins/tools/exec-command.js',
       'dsh-codex-mode/plugins/tools/apply-patch.js',
@@ -65,7 +67,7 @@ const PRESETS = [
     // Matched as a `name` suffix: a group child's row id is its local alias
     // (`compaction-basic`), while the package it mounts is the real identity.
     compactions: [
-      '@deepseek-ai/dsh-compaction-basic',
+      'dsh-codex-mode/plugins/harness/codex-context-compaction.js',
       '@deepseek-ai/dsh-command-compact',
       '@deepseek-ai/dsh-compaction-tool-result-pruner',
     ],

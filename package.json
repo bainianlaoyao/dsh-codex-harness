@@ -1,7 +1,7 @@
 {
   "name": "dsh-codex-mode",
   "description": "Lightweight Codex-shaped coding tools for DeepSeek Harness: exec_command/write_stdin, apply_patch, view_image, OpenAI model routes, DSH-native collaboration tools, and a Codex-shaped 创造模式 (cordis) preset.",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "license": "MIT",
   "type": "module",
   "main": "plugins/preset-publisher.js",
@@ -14,6 +14,10 @@
     "./plugins/preset-publisher.js": "./plugins/preset-publisher.js",
     "./plugins/llm-openai.js": "./plugins/llm-openai.js",
     "./plugins/llm-responses.js": "./plugins/llm-responses.js",
+    "./plugins/context/context-mode.js": "./plugins/context/context-mode.js",
+    "./plugins/context/context-tools.js": "./plugins/context/context-tools.js",
+    "./plugins/context/context-web.js": "./plugins/context/context-web.js",
+    "./plugins/harness/codex-context-compaction.js": "./plugins/harness/codex-context-compaction.js",
     "./plugins/tools/restrict.js": "./plugins/tools/restrict.js",
     "./plugins/tools/exec-command.js": "./plugins/tools/exec-command.js",
     "./plugins/tools/apply-patch.js": "./plugins/tools/apply-patch.js",
@@ -32,6 +36,11 @@
     "plugins/preset-publisher.js",
     "plugins/llm-openai.js",
     "plugins/llm-responses.js",
+    "plugins/context/context-state.js",
+    "plugins/context/context-mode.js",
+    "plugins/context/context-tools.js",
+    "plugins/context/context-web.js",
+    "plugins/harness/codex-context-compaction.js",
     "plugins/tools/restrict.js",
     "plugins/tools/exec-command.js",
     "plugins/tools/echo-noise.js",
@@ -42,7 +51,10 @@
     "cordis.patch.yml",
     "assets/screenshots",
     "screenshots.json",
-    "README.md"
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "plugins/llm-messages.js"
   ],
   "dsh": {
     "client": {
@@ -69,6 +81,10 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-compaction": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-compaction-basic": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-session": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-tool-subagent": "^0.1.2-rc.1 || ^0.1.5-rc.1",
     "@deepseek-ai/dsh-scope": "^0.1.2-rc.1 || ^0.1.5-rc.1",
     "@deepseek-ai/schemastery": "*"
@@ -90,6 +106,8 @@
     "test:e2e": "node scripts/agent-types.e2e.mjs",
     "posttest": "npm run test:agents",
     "test:agents": "node plugins/agent-types.smoke.js && node plugins/typed-subagents.smoke.js && node plugins/typed-subagent-presets.smoke.js && node plugins/client.smoke.js",
-    "test": "node agent-presets/codex/check-rows.mjs && node agent-presets/codex-creative/check-rows.mjs && node plugins/preset-publisher.smoke.js && node scripts/bundle-patch.smoke.js && node scripts/scanroot-discovery.smoke.js && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/view-image.smoke.js && node tools/restrict.smoke.js && node tools/share-cordis-inspect.smoke.js && node win32-atomic-write-fallback.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js"
+    "test": "node agent-presets/codex/check-rows.mjs && node agent-presets/codex-creative/check-rows.mjs && node plugins/context/context.integration.js && node plugins/context/context.smoke.js && node plugins/context/context-web.smoke.js && node plugins/harness/codex-context-compaction.smoke.js && node plugins/preset-publisher.smoke.js && node scripts/bundle-patch.smoke.js && node scripts/scanroot-discovery.smoke.js && cd plugins && node tools/exec-command.smoke.js && node tools/apply-patch.smoke.js && node tools/view-image.smoke.js && node tools/restrict.smoke.js && node tools/share-cordis-inspect.smoke.js && node win32-atomic-write-fallback.smoke.js && node llm-openai.smoke.js && node llm-responses.smoke.js && node llm-alignment.smoke.js && node alignment/exec-command.alignment.smoke.js && node alignment/apply-patch.alignment.smoke.js",
+    "test:context": "node plugins/context/context.smoke.js && node plugins/context/context.integration.js && node plugins/context/context-web.smoke.js && node plugins/harness/codex-context-compaction.smoke.js",
+    "test:isolated": "node scripts/test-isolated.mjs"
   }
 }
