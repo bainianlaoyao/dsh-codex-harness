@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-10-16
+
+- Support DSH 0.2's asynchronous shell `execute()` while retaining DSH 0.1.5's `start()` path. Keep cancellation active during preparation and foreground execution, and disable shell expiry for commands that can continue as background jobs.
+- Adapt background job ownership and observed output to DSH 0.2, preserving independent `write_stdin` and `job_output` reads. Report asynchronous provider failures and clean up cancelled or failed process publication.
+- Add real shell/subprocess/job integration tests against both supported execution contracts, plus async preparation and cancellation regressions.
+
 ## 0.4.0 — 2026-10-16
 
 - Add Notes handoff to new Codex tool-mode sessions: atomic revisions, idempotent writes, paged reads, safe window resets, fork isolation and restart recovery.

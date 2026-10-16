@@ -8,3 +8,12 @@
 - 环境限制：根目录和 plugins 各有不同外部 node_modules 链接，直接 npm test 的旧 agent 测试失败于 SettingsProvider/原生 mock API。保留链接；隔离脚本避免混用。未宣称整个插件支持 0.2，也未验证真实付费模型网络、运行中浏览器服务。
 - 有意保留的 DSH 差异：AGENTS baseline/local 叠加；编辑前模型检查目标目录；原生 agent/权限/工具/交互，不复制 Codex harness。
 - 用户既有修改：package.json、client 与 context 原型已保留并整合；纳入本次发布源码，保留原有实现意图。
+
+## 2026-10-16：shell 接口兼容修复
+
+- 目标：修复 DSH 0.2 的 `ctx.shell.start is not a function`，保留 0.1.5 执行兼容；授权为源码修复与验证。
+- 已修改：等待异步 `shell.execute()`，旧接口回退到 `start()`；明确 `onExpiry: none`；准备/前台取消传递独立 signal，后台发布后解除调用 signal；失败或取消时 kill 并等待句柄收敛。
+- 一并修复：0.2 jobs 归属改用 session ID，使用 observed 输出流避免 `write_stdin` 抢走 `job_output` 的数据；旧 jobs 路径保留输出并报出异步 provider 失败。
+- 已验证：真实 DSH 0.2 shell/subprocess/jobs 与统一 0.1.5 依赖环境下的短命令、退出码 7、超过默认 50ms 超时的后台运行、write_stdin/job_output、job_kill、Ctrl-C、前台取消。异步 resolve/准备失败、准备取消、迟到句柄和交接取消由契约回归覆盖；0.2 另执行了真实 executeArgv 的准备取消。
+- 入口：`npm run test:exec`；旧版依赖验证 `npm run test:isolated -- run test:exec`。完整测试脚本也已纳入新增用例。
+- 修复交付时未部署或发布；用户随后明确授权发布 0.4.1 并在本机安装。完整隔离回归已通过；安装目标为现有 Web profile 的 0.3.5 副本。整个插件对 DSH 0.2 的兼容范围仍按此前记录，不因修复 shell 就扩大声明。

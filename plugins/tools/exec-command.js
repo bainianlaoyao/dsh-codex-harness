@@ -526,6 +526,7 @@ function drainOutput(proc, buffer, session) {
   }
   if (session !== undefined) session.total += delta
   if (buffer !== undefined) buffer.push(delta)
+  if (session?.jobOutputBuffer && session.jobOutputBuffer !== buffer) session.jobOutputBuffer.push(delta)
 }
 
 /** Whether the background process has settled. */
@@ -546,6 +547,21 @@ async function waitSettled(proc, deadline) {
     const race = await Promise.race([proc.done.then(() => 'settled'), pause().then(() => 'tick')])
     if (race === 'settled') return proc.status
   }
+}
+
+/** A settled handle may carry a provider failure rather than an exit code. */
+async function checkProcessResult(proc) {
+  try {
+    await proc.done
+    if (typeof proc.result === 'function') await proc.result()
+  } catch (error) {
+    throw new Error(formatExecCommandFailure(error))
+  }
+}
+
+async function stopProcess(proc) {
+  if (!settled(proc)) await Promise.resolve(proc.kill()).catch(() => {})
+  await Promise.resolve(proc.done).catch(() => {})
 }
 
 /**
@@ -692,21 +708,28 @@ function registerExecCommand(ctx, config) {
       let proc
       let jobId
       let jobSession
+      let processSessionId
+      let jobOutputBytes = 0
       const jobHolder = { proc: undefined, session: undefined }
       const jobOutputBuffer = makeBuffer(config)
-      try {
-        // Start outside the job registry first. Short commands are returned
-        // by this tool call and must not create a completion notice. A job is
-        // registered only after the foreground yield is exhausted.
-        proc = startShell(ctx, exec, args.cmd, cwd)
-      } catch (error) {
-        throw new Error(formatExecCommandFailure(error))
-      }
+      // This signal owns preparation and foreground execution. Detaching the
+      // caller at promotion lets the same process continue under the job owner.
+      const commandAbort = new AbortController()
       const onAbort = () => {
-        if (!settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
+        commandAbort.abort(exec.signal.reason)
+        if (proc && !settled(proc)) void Promise.resolve(proc.kill()).catch(() => {})
       }
       exec.signal.addEventListener('abort', onAbort, { once: true })
       try {
+        exec.signal.throwIfAborted()
+        // Short commands do not register jobs or emit completion notices.
+        try {
+          proc = await startShell(ctx, exec, args.cmd, cwd, commandAbort.signal)
+        } catch (error) {
+          exec.signal.throwIfAborted()
+          throw new Error(formatExecCommandFailure(error))
+        }
+        exec.signal.throwIfAborted()
         const buffer = jobOutputBuffer
         const deadlineEnd = Date.now() + yieldMs
         while (!settled(proc)) {
@@ -716,6 +739,9 @@ function registerExecCommand(ctx, config) {
           if (Date.now() >= deadlineEnd) break
           if (exec.signal.aborted) exec.signal.throwIfAborted()
         }
+        exec.signal.throwIfAborted()
+        if (settled(proc)) await checkProcessResult(proc)
+        exec.signal.throwIfAborted()
         drainOutput(proc, buffer)
         const wallTime = (Date.now() - start) / 1000
         const chunkId = generateChunkId()
@@ -732,14 +758,20 @@ function registerExecCommand(ctx, config) {
             model_output_max_tokens: maxTokens,
           })
         }
+        const observedJobs = typeof jobs?.readAt === 'function'
         if (jobs !== undefined) jobId = jobs.start({
           kind: 'exec',
           label: args.cmd,
-          owner,
+          owner: observedJobs ? owner.session.id ?? owner.id : owner,
           outputLimitBytes: config.maxOutputBytes ?? UNIFIED_EXEC_OUTPUT_MAX_BYTES,
+          // DSH 0.2 pumps absolute readers independently of write_stdin's
+          // consuming cursor. The legacy registry calls hooks.readOutput.
+          ...(observedJobs ? { output: ['stdout', 'stderr'].map(channel => ({
+            channel, read: offset => proc.observed[channel].readFrom(offset),
+          })) } : {}),
           run() {
             jobHolder.proc = proc
-            const done = Promise.resolve(proc.done).then(() => ({
+            const done = checkProcessResult(proc).then(() => ({
               status: proc.status === 'killed' ? 'killed' : proc.exitCode === 0 ? 'completed' : 'failed',
               detail: proc.exitCode === null || proc.exitCode === undefined ? proc.status : `exit code ${proc.exitCode}`,
             }))
@@ -749,9 +781,9 @@ function registerExecCommand(ctx, config) {
               },
               done,
               readOutput() {
-                const before = jobOutputBuffer.totalObservedBytes
                 drainOutput(proc, jobOutputBuffer)
-                if (jobOutputBuffer.totalObservedBytes === before) return ''
+                if (jobOutputBuffer.totalObservedBytes === jobOutputBytes) return ''
+                jobOutputBytes = jobOutputBuffer.totalObservedBytes
                 return jobOutputBuffer.toTextWithOmissionMarker()
               },
             }
@@ -759,12 +791,15 @@ function registerExecCommand(ctx, config) {
         })
         const allocated = registry.alloc(owner, proc, jobId)
         const id = allocated.id
+        processSessionId = id
         allocated.session.jobId = jobId
         jobSession = allocated.session
+        if (!observedJobs) jobSession.jobOutputBuffer = jobOutputBuffer
         jobHolder.session = jobSession
         // The job registry owns the same process, while the Codex registry
         // keeps the numeric session id required by write_stdin.
         jobSession.jobId = jobId
+        exec.signal.throwIfAborted()
         const output = buildOutput(null, buffer, maxTokens)
         return compact({
           chunk_id: chunkId,
@@ -780,7 +815,8 @@ function registerExecCommand(ctx, config) {
       } catch (error) {
         // Promotion can fail (for example at the owner concurrency limit).
         // Do not leave an unregistered process alive after the tool fails.
-        if (!settled(proc)) await Promise.resolve(proc.kill()).catch(() => {})
+        if (proc) await stopProcess(proc)
+        if (processSessionId) registry.release(owner, processSessionId)
         throw error
       } finally {
         exec.signal.removeEventListener('abort', onAbort)
@@ -847,6 +883,8 @@ function registerExecCommand(ctx, config) {
       const wallTime = (Date.now() - start) / 1000
       const chunkId = generateChunkId()
       if (settled(session.proc)) {
+        await checkProcessResult(session.proc)
+        drainOutput(session.proc, buffer, session)
         session.exitCode = session.proc.exitCode ?? null
         session.killed = session.proc.status === "killed"
         registry.release(owner, args.session_id)
@@ -881,16 +919,23 @@ function registerExecCommand(ctx, config) {
 }
 
 /** Start one command through the host shell seam (git bash on this profile). */
-function startShell(ctx, exec, command, cwd) {
+async function startShell(ctx, exec, command, cwd, signal) {
   const shellEnv = ctx.get('shellEnv')
   const dshEnv = shellEnv !== undefined ? shellEnv.collect(exec) : undefined
   const request = {
     command,
+    signal,
+    // Foreground yield is not a process deadline; promoted jobs must survive
+    // the shell's default timeout until completion or explicit cancellation.
+    onExpiry: 'none',
     ...(cwd === undefined ? {} : { workdir: cwd }),
     ...(dshEnv === undefined ? {} : { dshEnv }),
   }
-  const resolved = ctx.shell.resolve(request)
-  return ctx.shell.start(resolved)
+  const resolved = await ctx.shell.resolve(request)
+  signal.throwIfAborted()
+  return typeof ctx.shell.execute === 'function'
+    ? await ctx.shell.execute(resolved)
+    : ctx.shell.start(resolved)
 }
 
 export const Config = z.object({
